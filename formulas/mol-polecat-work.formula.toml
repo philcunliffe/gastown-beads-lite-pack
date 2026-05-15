@@ -1,0 +1,201 @@
+description = """
+Polecat work lifecycle - feature-branch refinery variant.
+
+Extends mol-polecat-base with feature-branch workspace setup and a refinery
+handoff. The polecat creates or resumes a feature branch, implements the work,
+pushes the branch, records merge metadata on the original work bead, assigns
+that bead to the refinery, then exits.
+
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
+## Work Bead Contract
+
+Work beads flow:
+
+```text
+pool -> polecat -> refinery -> closed
+```
+
+The polecat sets:
+
+- `metadata.work_dir`: absolute path to the issue worktree
+- `metadata.branch`: source branch name
+- `metadata.target`: target branch, usually `{{base_branch}}`
+- `metadata.gc.routed_to`: refinery target after handoff
+
+The refinery sets:
+
+- `metadata.merge_result`
+- `metadata.merged_sha` / `metadata.pr_url`
+- `metadata.rejection_reason` if the branch is sent back to the pool
+
+If a rejected bead comes back with `metadata.branch` and
+`metadata.rejection_reason`, resume the existing branch and fix exactly the
+rejection reason before resubmitting.
+"""
+formula = "mol-polecat-work"
+extends = ["mol-polecat-base"]
+version = 1
+
+[vars]
+[vars.binding_prefix]
+description = "Pack binding prefix used in session names"
+default = "gastown-beads-lite."
+
+[vars.refinery_target]
+description = "Qualified refinery target. Empty means derive from $GC_RIG and binding_prefix."
+default = ""
+
+[[steps]]
+id = "workspace-setup"
+title = "Set up worktree and feature branch"
+needs = ["load-context"]
+description = """
+Ensure you have an isolated git worktree and a clean feature branch. These
+commands are intended to be idempotent after a crash or restart.
+
+**Config: base_branch = {{base_branch}}**
+**Config: setup_command = {{setup_command}}**
+
+**1. Fetch latest refs:**
+```bash
+git fetch --prune origin
+```
+
+**2. Resolve or create the issue worktree.**
+
+Check whether the work bead already records a worktree:
+```bash
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
+```
+
+If it exists and the directory is present, reuse it:
+```bash
+cd "$WORKTREE"
+```
+
+If it is missing, create a worktree scoped to the bead:
+```bash
+WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
+git worktree add "$WORKTREE_PATH" --detach "origin/{{base_branch}}"
+cd "$WORKTREE_PATH"
+bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+```
+
+**3. Resolve or create the feature branch.**
+
+Read `metadata.branch`:
+```bash
+BRANCH=$(bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+```
+
+If `BRANCH` is set, treat it as authoritative. Fetch it and check it out:
+```bash
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git checkout -B "$BRANCH" "origin/$BRANCH"
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git checkout "$BRANCH"
+else
+    echo "metadata.branch=$BRANCH was set but no local or remote branch exists."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+If the bead carries a rejection reason, rebase the existing branch on the
+latest target branch and clear the rejection only after the rebase succeeds:
+```bash
+REJECTION=$(bd show {{issue}} --json | jq -r '.[0].metadata.rejection_reason // empty')
+if [ -n "$REJECTION" ]; then
+    git rebase "origin/{{base_branch}}"
+    bd update {{issue}} --unset-metadata rejection_reason
+fi
+```
+
+If `BRANCH` is empty, create a new branch from the fresh remote target:
+```bash
+git fetch origin "{{base_branch}}"
+BRANCH="polecat/{{issue}}"
+git branch -D "$BRANCH" 2>/dev/null || true
+git checkout -B "$BRANCH" "origin/{{base_branch}}"
+bd update {{issue}} --set-metadata branch="$BRANCH"
+```
+
+**4. Verify the workspace and run setup if configured:**
+```bash
+git status
+{{setup_command}}
+```
+
+Empty `setup_command` means skip setup.
+
+**Exit criteria:** You are in the issue worktree on a clean feature branch,
+with `work_dir` and `branch` recorded on the bead."""
+
+[[steps]]
+id = "submit-to-refinery"
+title = "Push branch, assign to refinery, and exit"
+needs = ["self-review"]
+description = """
+Hand off the completed branch to refinery. You cease to exist after this step.
+
+**1. Ensure all work is committed:**
+```bash
+git status --porcelain
+```
+
+If any output appears:
+```bash
+git add -A
+git commit -m "chore: capture remaining work ({{issue}})"
+```
+
+**2. Push the feature branch:**
+```bash
+BRANCH=$(git branch --show-current)
+git push origin HEAD:"$BRANCH"
+```
+
+**3. Record handoff metadata:**
+```bash
+bd update {{issue}} \
+  --set-metadata branch="$BRANCH" \
+  --set-metadata target={{base_branch}} \
+  --notes "Implemented: <brief summary>"
+```
+
+If the caller supplied `metadata.existing_pr`, leave it in place. The refinery
+will validate the PR and record the canonical `pr_url`.
+
+**4. Assign the work bead to refinery:**
+```bash
+REFINERY_TARGET="{{refinery_target}}"
+if [ -z "$REFINERY_TARGET" ]; then
+    REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+fi
+bd update {{issue}} \
+  --status open \
+  --assignee "$REFINERY_TARGET" \
+  --set-metadata gc.routed_to="$REFINERY_TARGET"
+```
+
+Updating both `assignee` and `gc.routed_to` makes the work visible to the
+on-demand refinery session and stops the polecat pool from counting it.
+
+**5. Detach from the local branch and exit:**
+```bash
+git checkout --detach
+git branch -D "$BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit
+```
+
+**Exit criteria:** Branch pushed, metadata recorded, bead assigned to refinery,
+and the polecat session drained."""

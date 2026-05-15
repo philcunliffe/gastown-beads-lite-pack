@@ -24,6 +24,7 @@ run `gc <cmd> --help` rather than guessing.
 3. **Dispatch existing rig work:** run `gc sling <rig>/gastown-beads-lite.polecat <bead-id>`
 4. **Monitor work:** `gc status`, `gc rig status <rig>`, and `gc session peek <name>`
 5. **Escalate through the rig witness:** `gc mail send <rig>/gastown-beads-lite.witness -s "HELP: ..." -m "..."`
+6. **Wake a merge queue:** `gc session nudge <rig>/gastown-beads-lite.refinery "Run gc hook and process assigned merge work."`
 
 ## Working with beads
 

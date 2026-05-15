@@ -3,3 +3,4 @@
 .beads/
 *.sqlite3
 *.lock
+AGENTS.md

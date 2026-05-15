@@ -1,14 +1,13 @@
 scope = "rig"
 wake_mode = "fresh"
-work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}"
-nudge = "Run gc hook; it checks assigned work first, then routed pool work."
+work_dir = ".gc/worktrees/{{.Rig}}/refinery"
+nudge = "Run gc hook; it checks assigned merge work first, then routed refinery work."
 pre_start = ["gc gastown-beads-lite worktree-setup {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "2h"
-min_active_sessions = 0
-max_active_sessions = 3
+max_active_sessions = 1
 scale_check = "gc gastown-beads-lite scale-check {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
 work_query = "gc gastown-beads-lite work-query {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
-sling_query = "BEADS_DIR={{.RigRoot}}/.beads gc gastown-beads-lite bd update {} --set-metadata gc.routed_to={{.Rig}}/{{.AgentBase}}"
+sling_query = "BEADS_DIR={{.RigRoot}}/.beads gc gastown-beads-lite bd update {} --assignee {{.Rig}}/{{.AgentBase}} --set-metadata gc.routed_to={{.Rig}}/{{.AgentBase}}"
 
 [env]
 BD_NAME = "bd"

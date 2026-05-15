@@ -8,12 +8,13 @@ The pack provides:
 - a `gastown-beads-lite` Gas City pack
 - a beads-lite exec provider script
 - a `gc gastown-beads-lite bd ...` command for city-level bead CLI access
-- generic mayor, polecat, and witness prompts
+- generic mayor, polecat, refinery, and witness prompts
 - rig-scoped coding dispatch through `gastown-beads-lite.polecat`
+- optional refinery merge handoff through `gastown-beads-lite.refinery`
 - beads-lite-compatible workflow formulas
 
-It intentionally does not import the normal `bd`/Dolt pack, refinery, deacon,
-or Dolt maintenance roles.
+It intentionally does not import the normal `bd`/Dolt pack, deacon, or Dolt
+maintenance roles.
 
 ## Requirements
 
@@ -77,6 +78,22 @@ Create coding work for a rig:
 gc sling my-rig/gastown-beads-lite.polecat "implement the requested change"
 ```
 
+The default polecat prompt now uses the refinery handoff recipe:
+
+```sh
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd formula show mol-polecat-work
+```
+
+Polecats push a feature branch and assign the original work bead to:
+
+```text
+my-rig/gastown-beads-lite.refinery
+```
+
+The on-demand refinery rebases the branch, runs configured checks, merges
+directly or publishes a PR, and closes or rejects the work bead. For the older
+single-agent path, use `mol-polecat-commit`.
+
 Inspect the city-level beads-lite store:
 
 ```sh
@@ -89,16 +106,17 @@ Commands that name a bead ID route by prefix across the city and registered
 rig stores, so `gc gastown-beads-lite bd show az-123` runs against the rig
 whose prefix is `az`.
 
-Inside mayor, polecat, and witness sessions, use `gc gastown-beads-lite bd`,
-not bare `bd`. ID-based commands can route by prefix. Store-scoped commands
-without a bead ID, such as `list`, `ready`, `formula`, `create`, and `mol seed`,
-need `BEADS_DIR=<rig-root>/.beads` when they should operate on a rig store.
-The agent prompts include `BEADS_DIR` on rig examples as the deterministic form.
+Inside mayor, polecat, refinery, and witness sessions, use
+`gc gastown-beads-lite bd`, not bare `bd`. ID-based commands can route by
+prefix. Store-scoped commands without a bead ID, such as `list`, `ready`,
+`formula`, `create`, and `mol seed`, need `BEADS_DIR=<rig-root>/.beads` when
+they should operate on a rig store. The agent prompts include `BEADS_DIR` on
+rig examples as the deterministic form.
 
 ## Notes
 
-`gc sling ... --on mol-polecat-commit` is not enabled as the default dispatch
-path here because current Gas City molecule attachment semantics can conflict
-with beads-lite parent-child dependency validation. The polecat prompt still
-uses `gc gastown-beads-lite bd formula show mol-polecat-commit` as the worker
-recipe for direct commit coding work.
+`gc sling ... --on mol-polecat-work` is still optional because current Gas City
+molecule attachment semantics can conflict with beads-lite parent-child
+dependency validation. The safe path is raw `gc sling` routing plus the polecat
+prompt telling workers to read the installed formula with
+`gc gastown-beads-lite bd formula show ...`.

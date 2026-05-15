@@ -11,3 +11,8 @@ mode = "always"
 template = "witness"
 scope = "rig"
 mode = "always"
+
+[[named_session]]
+template = "refinery"
+scope = "rig"
+mode = "on_demand"

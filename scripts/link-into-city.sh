@@ -41,6 +41,9 @@ default_sling_target = "<rig>/gastown-beads-lite.polecat"
 [rigs.imports.gastown-beads-lite]
 source = "packs/$pack_link_name"
 
+Polecats submit merge-ready branches to:
+  <rig>/gastown-beads-lite.refinery
+
 EOF
 
 if ! command -v gc >/dev/null 2>&1; then

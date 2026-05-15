@@ -1,0 +1,373 @@
+description = """
+Beads-lite refinery merge pass.
+
+The refinery is an on-demand rig session. Each wake processes one assigned
+merge bead, then drains. It does not create patrol wisps and does not call
+normal Dolt-backed `gc bd` or `gc workflow` commands.
+
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
+## Work Bead Contract
+
+Polecats assign the original work bead to refinery with:
+
+- `metadata.branch`: source branch to merge
+- `metadata.target`: target branch, defaulting to `{{target_branch}}`
+- `metadata.merge_strategy`: `direct`, `mr`, or `pr`
+- `metadata.existing_pr`: optional PR URL to reuse in `mr` / `pr` mode
+
+On success, refinery closes the work bead. On conflict or branch-caused test
+failure, refinery reopens the bead to the polecat pool with
+`metadata.rejection_reason`.
+"""
+formula = "mol-refinery-patrol"
+version = 1
+contract = "graph.v2"
+
+[vars]
+[vars.binding_prefix]
+description = "Pack binding prefix used in session names"
+default = "gastown-beads-lite."
+
+[vars.work_query]
+description = "Command that returns refinery work JSON"
+default = "gc hook"
+
+[vars.run_tests]
+description = "Whether to run tests before merging"
+default = "true"
+
+[vars.setup_command]
+description = "Setup/install command. Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command. Empty = skip."
+default = ""
+
+[vars.lint_command]
+description = "Lint command. Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Test command to run when run_tests is true. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Build command. Empty = skip."
+default = ""
+
+[vars.target_branch]
+description = "Default target branch for merges"
+default = "main"
+
+[vars.delete_merged_branches]
+description = "Whether to delete source branches after a direct merge"
+default = "true"
+
+[[steps]]
+id = "validate-identity"
+title = "Validate refinery identity"
+description = """
+Fail fast if `$GC_AGENT` is not set. Refinery work is assigned to the canonical
+agent identity, not to a guessed alias.
+
+```bash
+if [ -z "${GC_AGENT:-}" ]; then
+    gc mail send mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
+      -m "The refinery session has no canonical agent identity."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step only when `$GC_AGENT` is non-empty."""
+
+[[steps]]
+id = "find-work"
+title = "Find and claim one merge bead"
+needs = ["validate-identity"]
+description = """
+Check the assigned queue first, then the configured work query:
+
+```bash
+WORK=$(bd list --assignee="$GC_AGENT" --status=in_progress --exclude-type=epic --json --limit=1 | jq -r '.[0].id // empty')
+if [ -z "$WORK" ]; then
+    WORK=$({{work_query}} | jq -r '.[0].id // empty')
+fi
+```
+
+If no work is found, drain and exit:
+```bash
+if [ -z "$WORK" ]; then
+    gc runtime drain-ack
+    exit 0
+fi
+```
+
+Claim the bead for this refinery pass:
+```bash
+bd update "$WORK" --status in_progress --assignee "$GC_AGENT"
+bd show "$WORK" --json | jq '.[0].metadata'
+```
+
+The bead must have `metadata.branch`. If it is missing, block the bead for
+human correction:
+```bash
+BRANCH=$(bd show "$WORK" --json | jq -r '.[0].metadata.branch // empty')
+if [ -z "$BRANCH" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="metadata.branch is required for refinery"
+    gc mail send mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step with `$WORK` set."""
+
+[[steps]]
+id = "rebase"
+title = "Rebase source branch on target"
+needs = ["find-work"]
+description = """
+Read merge metadata:
+
+```bash
+BRANCH=$(bd show "$WORK" --json | jq -r '.[0].metadata.branch')
+TARGET=$(bd show "$WORK" --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
+RUN_BRANCH="refinery/$WORK"
+```
+
+Fetch the source and target branches:
+```bash
+git fetch --prune origin
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+git fetch origin "$TARGET"
+```
+
+Create a local refinery branch and rebase it:
+```bash
+git checkout -B "$RUN_BRANCH" "origin/$BRANCH"
+git rebase "origin/$TARGET"
+```
+
+If rebase conflicts:
+
+```bash
+git rebase --abort
+REASON="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)"
+bd update "$WORK" \
+  --status open \
+  --assignee "" \
+  --set-metadata rejection_reason="$REASON" \
+  --set-metadata merge_result=rejected \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+git checkout "origin/$TARGET"
+git branch -D "$RUN_BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit 1
+```
+
+Do not delete the source branch on conflict. A polecat needs it for recovery.
+
+**Exit criteria:** `$RUN_BRANCH` is rebased on `origin/$TARGET`."""
+
+[[steps]]
+id = "run-checks"
+title = "Run configured verification"
+needs = ["rebase"]
+description = """
+Run configured checks from the rebased refinery branch:
+
+```bash
+{{setup_command}}
+{{typecheck_command}}
+{{lint_command}}
+{{build_command}}
+```
+
+If `run_tests` is true, run:
+```bash
+{{test_command}}
+```
+
+Skip empty commands. Track exactly which checks passed or failed."""
+
+[[steps]]
+id = "handle-failures"
+title = "Reject branch-caused failures"
+needs = ["run-checks"]
+description = """
+If all configured checks passed, continue to `merge-or-pr`.
+
+If a check failed, decide whether the failure is caused by the source branch
+or already exists on the target branch.
+
+For a branch-caused failure, send the bead back to polecats:
+```bash
+SUMMARY="<failure summary>"
+bd update "$WORK" \
+  --status open \
+  --assignee "" \
+  --set-metadata rejection_reason="$SUMMARY" \
+  --set-metadata merge_result=rejected \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+git checkout "origin/$TARGET"
+git branch -D "$RUN_BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit 1
+```
+
+Leave the source branch intact so a polecat can resume it.
+
+For a pre-existing target failure, check for an existing bug and create one if
+needed, then continue:
+```bash
+bd search "<failure summary>" --json
+bd create "Pre-existing failure: <summary>" --type bug --priority 1
+```
+
+Do not fix code in the refinery. The refinery is a merge processor."""
+
+[[steps]]
+id = "merge-or-pr"
+title = "Merge directly or publish a pull request"
+needs = ["handle-failures"]
+description = """
+Read merge strategy:
+
+```bash
+MERGE_STRATEGY=$(bd show "$WORK" --json | jq -r '.[0].metadata.merge_strategy // "direct"')
+EXISTING_PR=$(bd show "$WORK" --json | jq -r '.[0].metadata.existing_pr // empty')
+if [ "$MERGE_STRATEGY" = "pr" ]; then
+    MERGE_STRATEGY="mr"
+fi
+if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
+    MERGE_STRATEGY="mr"
+fi
+```
+
+**Direct merge path:**
+
+```bash
+if [ "$MERGE_STRATEGY" = "direct" ]; then
+    git checkout -B "$TARGET" "origin/$TARGET"
+    git merge --ff-only "$RUN_BRANCH"
+    git push origin HEAD:"$TARGET"
+    git fetch origin "$TARGET"
+    LOCAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse "origin/$TARGET")
+    if [ "$LOCAL" != "$REMOTE" ]; then
+        echo "Push verification failed; do not close $WORK."
+        gc runtime drain-ack
+        exit 1
+    fi
+    MERGED_SHA=$(git rev-parse HEAD)
+    MERGED_SHORT=$(git rev-parse --short HEAD)
+    bd update "$WORK" \
+      --set-metadata merge_result=merged \
+      --set-metadata merged_sha="$MERGED_SHA" \
+      --set-metadata merged_target="$TARGET" \
+      --unset-metadata rejection_reason
+    bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"
+    git branch -D "$RUN_BRANCH" 2>/dev/null || true
+    if [ "{{delete_merged_branches}}" = "true" ]; then
+        git push origin --delete "$BRANCH" || true
+    fi
+fi
+```
+
+**Pull-request path (`mr` or `pr`):**
+
+```bash
+if [ "$MERGE_STRATEGY" = "mr" ]; then
+    git checkout "$RUN_BRANCH"
+    git push origin HEAD:"$BRANCH" --force-with-lease
+
+    ISSUE_TITLE=$(bd show "$WORK" --json | jq -r '.[0].title')
+    if [ -n "$EXISTING_PR" ]; then
+        PR_REF="$EXISTING_PR"
+    else
+        PR_URL=$(gh pr create \
+          --base "$TARGET" \
+          --head "$BRANCH" \
+          --title "$ISSUE_TITLE ($WORK)" \
+          --body "Automated pull request published by gastown-beads-lite refinery for $WORK." 2>/dev/null || true)
+        if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+        fi
+        PR_REF="$BRANCH"
+    fi
+
+    PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName -- "$PR_REF")
+    PR_URL=$(printf '%s\n' "$PR_INFO" | jq -r '.url')
+    PR_NUMBER=$(printf '%s\n' "$PR_INFO" | jq -r '.number')
+    PR_STATE=$(printf '%s\n' "$PR_INFO" | jq -r '.state')
+    PR_HEAD=$(printf '%s\n' "$PR_INFO" | jq -r '.headRefName')
+    PR_BASE=$(printf '%s\n' "$PR_INFO" | jq -r '.baseRefName')
+    if [ "$PR_STATE" != "OPEN" ] || [ "$PR_HEAD" != "$BRANCH" ] || [ "$PR_BASE" != "$TARGET" ]; then
+        bd update "$WORK" \
+          --status open \
+          --assignee "" \
+          --set-metadata merge_result=blocked \
+          --set-metadata gc.routed_to=human \
+          --set-metadata blocked_reason="Pull request validation failed"
+        gc mail send mayor/ -s "ESCALATION: refinery PR validation failed" -m "Work bead: $WORK"
+        gc runtime drain-ack
+        exit 1
+    fi
+
+    bd update "$WORK" \
+      --set-metadata merge_result=pull_request \
+      --set-metadata pr_url="$PR_URL" \
+      --set-metadata pr_number="$PR_NUMBER" \
+      --set-metadata merged_target="$TARGET" \
+      --unset-metadata rejection_reason
+    bd close "$WORK" --reason "Pull request ready: $PR_URL"
+    git checkout "origin/$TARGET"
+    git branch -D "$RUN_BRANCH" 2>/dev/null || true
+fi
+```
+
+If `MERGE_STRATEGY` is anything else, block and escalate:
+```bash
+if [ "$MERGE_STRATEGY" != "direct" ] && [ "$MERGE_STRATEGY" != "mr" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="Unsupported merge_strategy=$MERGE_STRATEGY"
+    gc mail send mayor/ -s "ESCALATION: unsupported refinery merge strategy" -m "Work bead: $WORK"
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+**Exit criteria:** The work bead is closed only after a verified direct push or
+verified pull request."""
+
+[[steps]]
+id = "drain"
+title = "Drain refinery session"
+needs = ["merge-or-pr"]
+description = """
+Summarize the merge result in the bead close reason or notes, then drain:
+
+```bash
+gc runtime drain-ack
+exit
+```
+
+The on-demand refinery will wake again when more work is assigned."""

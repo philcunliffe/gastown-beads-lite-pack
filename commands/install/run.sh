@@ -75,3 +75,6 @@ echo "  exec:$provider"
 echo
 echo "Default sling target shape:"
 echo "  <rig>/gastown-beads-lite.polecat"
+echo
+echo "Refinery target shape:"
+echo "  <rig>/gastown-beads-lite.refinery"

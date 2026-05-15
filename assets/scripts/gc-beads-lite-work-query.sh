@@ -20,13 +20,13 @@ emit_if_nonempty() {
   return 1
 }
 
-for id in "${GC_SESSION_ID:-}" "${GC_SESSION_NAME:-}" "${GC_ALIAS:-}"; do
+for id in "${GC_AGENT:-}" "${GC_SESSION_ID:-}" "${GC_SESSION_NAME:-}" "${GC_ALIAS:-}"; do
   [ -z "$id" ] && continue
   rows="$("$bd_cli" list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null || true)"
   emit_if_nonempty "$rows" && exit 0
 done
 
-for id in "${GC_SESSION_ID:-}" "${GC_SESSION_NAME:-}" "${GC_ALIAS:-}"; do
+for id in "${GC_AGENT:-}" "${GC_SESSION_ID:-}" "${GC_SESSION_NAME:-}" "${GC_ALIAS:-}"; do
   [ -z "$id" ] && continue
   rows="$("$bd_cli" ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null || true)"
   emit_if_nonempty "$rows" && exit 0
