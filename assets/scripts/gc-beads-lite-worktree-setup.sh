@@ -47,6 +47,54 @@ if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
     exit 0
 fi
 
+# If $WT exists and is non-empty but lacks .git, the supervisor (or another
+# orchestrator) may have populated it with per-session scaffolding before
+# pre_start ran. Move that scaffolding aside so `git worktree add` can succeed,
+# then restore it after the worktree is created. Bail out if any unexpected
+# entries are present so we never destroy user data.
+RESCUE_DIR=""
+if [ -d "$WT" ] && [ -n "$(ls -A "$WT" 2>/dev/null)" ]; then
+    rescue_ok=1
+    unknown=""
+    for entry in "$WT"/* "$WT"/.[!.]* "$WT"/..?*; do
+        [ -e "$entry" ] || continue
+        name="${entry##*/}"
+        case "$name" in
+            .gc|.runtime|.logs|state.json)
+                ;;
+            .beads)
+                for sub in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+                    [ -e "$sub" ] || continue
+                    subname="${sub##*/}"
+                    case "$subname" in
+                        redirect|hooks|formulas)
+                            ;;
+                        *)
+                            rescue_ok=0
+                            unknown="$unknown .beads/$subname"
+                            ;;
+                    esac
+                done
+                ;;
+            *)
+                rescue_ok=0
+                unknown="$unknown $name"
+                ;;
+        esac
+    done
+
+    if [ "$rescue_ok" -eq 0 ]; then
+        die "refusing to overwrite non-empty work_dir with unknown contents:$unknown"
+    fi
+
+    RESCUE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gc-wt-rescue.XXXXXX")"
+    for entry in "$WT"/* "$WT"/.[!.]* "$WT"/..?*; do
+        [ -e "$entry" ] || continue
+        mv "$entry" "$RESCUE_DIR/"
+    done
+    rmdir "$WT"
+fi
+
 mkdir -p "$(dirname "$WT")"
 git -C "$RIG_ROOT" worktree prune >/dev/null 2>&1 || true
 
@@ -105,3 +153,25 @@ append_exclude ".github/copilot-instructions.md"
 append_exclude "state.json"
 
 sync_worktree
+
+# Restore any supervisor scaffolding we moved aside before `git worktree add`.
+# Only `.beads/` can collide with paths the script itself wrote (line 68-69);
+# merge those entries instead of overwriting the parent directory.
+if [ -n "${RESCUE_DIR:-}" ] && [ -d "$RESCUE_DIR" ]; then
+    for entry in "$RESCUE_DIR"/* "$RESCUE_DIR"/.[!.]* "$RESCUE_DIR"/..?*; do
+        [ -e "$entry" ] || continue
+        name="${entry##*/}"
+        if [ "$name" = ".beads" ] && [ -d "$WT/.beads" ]; then
+            for sub in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+                [ -e "$sub" ] || continue
+                subname="${sub##*/}"
+                rm -rf "$WT/.beads/$subname"
+                mv "$sub" "$WT/.beads/"
+            done
+            rmdir "$entry" 2>/dev/null || true
+        else
+            mv "$entry" "$WT/"
+        fi
+    done
+    rmdir "$RESCUE_DIR" 2>/dev/null || true
+fi
