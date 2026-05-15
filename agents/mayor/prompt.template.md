@@ -20,10 +20,10 @@ run `gc <cmd> --help` rather than guessing.
 ## How to work
 
 1. **Discover rigs:** `gc rig list` and `gc rig status <rig>`
-2. **Create coding work:** run `gc sling <rig>/gastown-lite.polecat "<task>"`
-3. **Dispatch existing rig work:** run `gc sling <rig>/gastown-lite.polecat <bead-id>`
+2. **Create coding work:** run `gc sling <rig>/gastown-beads-lite.polecat "<task>"`
+3. **Dispatch existing rig work:** run `gc sling <rig>/gastown-beads-lite.polecat <bead-id>`
 4. **Monitor work:** `gc status`, `gc rig status <rig>`, and `gc session peek <name>`
-5. **Escalate through the rig witness:** `gc mail send <rig>/gastown-lite.witness -s "HELP: ..." -m "..."`
+5. **Escalate through the rig witness:** `gc mail send <rig>/gastown-beads-lite.witness -s "HELP: ..." -m "..."`
 
 ## Working with beads
 
@@ -36,10 +36,19 @@ Use `gc gastown-beads-lite bd` to run bead commands against the city-level SQLit
 Core Gas City commands such as `gc sling`, `gc mail`, `gc status`, and
 `gc beads health` are wired to the beads-lite provider through city.toml.
 
-For rig coding work, prefer `gc sling <rig>/gastown-lite.polecat ...`.
+Commands that name a bead ID can route to the matching rig store by prefix.
+For direct rig-store commands without a bead ID, such as `list`, `ready`,
+`formula`, `create`, and `mol seed`, prefix the command with
+`BEADS_DIR=<rig-root>/.beads`. For normal rig coding work, prefer
+`gc sling <rig>/gastown-beads-lite.polecat ...`.
 That creates or routes a bead in the selected rig's beads-lite store and
 lets the polecat pool scale from routed work. Use `gc rig list` to choose
 the rig instead of assuming one.
+
+If the task body is more than a couple paragraphs, contains quotes, or contains
+newlines, use stdin instead of putting the whole task in one shell argument:
+
+    gc sling --stdin <rig>/gastown-beads-lite.polecat
 
 ## Handoff
 

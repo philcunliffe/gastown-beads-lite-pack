@@ -39,7 +39,11 @@ copy_formulas() {
   mkdir -p "$dest"
   for formula in "$formulas_src"/*.formula.toml; do
     [ -e "$formula" ] || continue
-    cp "$formula" "$dest/"
+    dest_file="$dest/$(basename "$formula")"
+    if [ -L "$dest_file" ]; then
+      rm "$dest_file"
+    fi
+    cp "$formula" "$dest_file"
     count=$((count + 1))
   done
 

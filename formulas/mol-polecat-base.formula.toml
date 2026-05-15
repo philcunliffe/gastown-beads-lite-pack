@@ -7,6 +7,14 @@ implementation, and self-review. Variant formulas extend this base and
 override workspace-setup with their specific branching/worktree strategy,
 then add a terminal step (submit, commit, etc).
 
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
 ## Variables
 
 | Variable | Source | Description |

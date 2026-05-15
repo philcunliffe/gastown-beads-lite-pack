@@ -38,7 +38,8 @@ parts that make sense with beads-lite.
 ## Portability Rules
 
 - Never hardcode city-local paths such as `/Users/phil/testcity`.
-- In agent TOML, prefer `{{.ConfigDir}}` for paths inside this pack.
+- Do not rely on `{{.ConfigDir}}` in agent env or prompt examples for wrapper
+  paths. It can render empty in some Gas City prompt/config contexts.
 - In command/order scripts, resolve the pack root from `GC_PACK_DIR` with a
   script-location fallback.
 - In prompts, use generic rig names like `<rig>` or template variables such as
@@ -52,11 +53,19 @@ The important distinction:
 
 - `bd` on a user's shell PATH may be regular beads.
 - `assets/bin/bd` is this pack's wrapper and must execute `bd-lite`.
-- Agent env prepends `{{.ConfigDir}}/assets/bin` so `bd` inside sessions resolves
-  to the wrapper.
-- Controller-side routing must call the wrapper explicitly, not a bare `bd`.
+- Agent prompts should call `gc gastown-beads-lite bd ...` explicitly. Do not
+  depend on session `PATH` making bare `bd` resolve to this pack's wrapper.
+- Controller-side routing must call `gc gastown-beads-lite bd` or the wrapper
+  explicitly, not a bare `bd`.
 - The `gc gastown-beads-lite bd` command routes ID-based commands by prefix
   using `gc rig list --json`; commands without an ID stay on the city store.
+- ID-based commands like `show az-123` and `update az-123` can omit `BEADS_DIR`
+  when city-root routing is available.
+- For no-ID/store-scoped commands in prompts and sling queries, prefix the
+  command with `BEADS_DIR=<rig-root>/.beads` so `list`, `ready`, `formula`,
+  `create`, and `mol seed` use the rig store. It is also fine to keep
+  `BEADS_DIR` on ID-based examples for deterministic agent behavior from
+  worktrees.
 
 The wrapper honors:
 
@@ -68,6 +77,38 @@ The wrapper honors:
 The exec provider is `assets/scripts/gc-beads-lite.sh`. Its default store root
 should resolve from `GC_STORE_ROOT`, `GC_CITY_PATH`, `GC_CITY_ROOT`, `GC_CITY`,
 then `PWD`, in that order.
+
+## Commands And Scripts
+
+- `commands/bd/run.sh` backs `gc gastown-beads-lite bd`. It finds `bd-lite`
+  from `GC_BEADS_LITE_BD`, `BEADS_LITE_BD`, then `PATH`; sets
+  `BD_EXPORT_AUTO=false` and `BD_NAME=bd`; serializes access with
+  `.beads/gc-beads-lite.lock`; and routes ID-based commands such as `show`,
+  `update`, `close`, and `delete` to the matching rig store by comparing the
+  bead ID prefix with `gc rig list --json`. If `BEADS_DIR` is already set or a
+  `--db` argument is supplied, it does not do prefix routing.
+- `assets/scripts/gc-beads-lite.sh` is the Gas City beads exec provider used by
+  `city.toml [beads].provider`. It implements the provider operations against a
+  beads-lite SQLite DB and normalizes rows into the shape Gas City expects.
+- `assets/scripts/gc-beads-lite-scale-check.sh` backs
+  `gc gastown-beads-lite scale-check`. It counts unassigned ready beads whose
+  `metadata.gc.routed_to` matches the qualified target. Pass the rig root as the
+  second argument so it sets `BEADS_DIR=<rig-root>/.beads`.
+- `assets/scripts/gc-beads-lite-work-query.sh` backs
+  `gc gastown-beads-lite work-query`. It first returns work assigned to the
+  current session, then ready work assigned to the session, then unassigned
+  ready work routed to the qualified target. Persistent/non-ephemeral sessions
+  do not pull new routed work from the shared pool.
+- `commands/install/run.sh` copies bundled `*.formula.toml` files into the city
+  and rig `.beads/formulas` directories. It removes stale symlink destinations
+  before copying so old local pack links do not cause writes into the wrong
+  source tree.
+- `scripts/link-into-city.sh <city-path> [pack-link-name]` is a convenience
+  integrator for local development. It creates or updates
+  `<city>/packs/<pack-link-name>` as a symlink to this repo, prints the required
+  `pack.toml` and `city.toml` snippets, and, once the city config resolves,
+  runs `gc gastown-beads-lite install`, `gc rig list`, and a dry-run sling
+  smoke check for the first non-HQ rig.
 
 ## Formulas
 
@@ -90,8 +131,16 @@ parent-child dependency validation. The current safe path is raw `gc sling`
 routing plus the polecat prompt telling the worker to read:
 
 ```sh
-bd formula show mol-polecat-commit
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd formula show mol-polecat-commit
 ```
+
+Formula bodies may still contain generic `bd ...` examples because they are
+workflow recipes. Prompt text for agents must say to translate those examples to
+`gc gastown-beads-lite bd ...`, adding `BEADS_DIR=<rig-root>/.beads` for
+commands that do not name a bead ID or whenever deterministic rig-store
+selection matters. If a formula is intended to be copied directly into a shell
+rather than read by an agent, rewrite its examples to the explicit wrapper form
+first.
 
 ## Dispatch Model
 

@@ -5,10 +5,9 @@ nudge = "Run gc hook; it checks assigned work first, then routed pool work."
 idle_timeout = "2h"
 min_active_sessions = 0
 max_active_sessions = 3
-scale_check = "{{.ConfigDir}}/assets/scripts/gc-beads-lite-scale-check.sh {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
-work_query = "{{.ConfigDir}}/assets/scripts/gc-beads-lite-work-query.sh {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
-sling_query = "BEADS_DIR={{.RigRoot}}/.beads {{.ConfigDir}}/assets/bin/bd update {} --set-metadata gc.routed_to={{.Rig}}/{{.AgentBase}}"
+scale_check = "gc gastown-beads-lite scale-check {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
+work_query = "gc gastown-beads-lite work-query {{.Rig}}/{{.AgentBase}} {{.RigRoot}}"
+sling_query = "BEADS_DIR={{.RigRoot}}/.beads gc gastown-beads-lite bd update {} --set-metadata gc.routed_to={{.Rig}}/{{.AgentBase}}"
 
 [env]
-PATH = "{{.ConfigDir}}/assets/bin:$PATH"
 BD_NAME = "bd"

@@ -6,6 +6,14 @@ base_branch, no feature branch) and direct commit+push instead of refinery
 submission. Designed for small installations where merge review is
 unnecessary.
 
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
 ## Polecat Contract (Direct-Commit Model)
 
 1. Receive work (molecule poured with this formula, assigned to you)

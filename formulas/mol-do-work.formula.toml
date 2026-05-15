@@ -9,6 +9,14 @@ and closes the bead when done.
 Use this for demos and simple single-agent workflows. For coding work in this
 lite pack, use mol-polecat-commit instead.
 
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
 ## Variables
 
 | Variable | Source | Description |

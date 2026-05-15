@@ -65,6 +65,10 @@ Then install formulas into the city and registered rig beads-lite stores:
 gc gastown-beads-lite install
 ```
 
+For a local checkout, `scripts/link-into-city.sh <city-path>` creates the
+`packs/gastown-beads-lite-pack` symlink, prints the TOML snippets above, and
+runs install/validation once the city config resolves.
+
 ## Usage
 
 Create coding work for a rig:
@@ -85,13 +89,16 @@ Commands that name a bead ID route by prefix across the city and registered
 rig stores, so `gc gastown-beads-lite bd show az-123` runs against the rig
 whose prefix is `az`.
 
-Inside mayor, polecat, and witness sessions, `bd` resolves to this pack's
-wrapper and uses the session's `BEADS_DIR` when one is set.
+Inside mayor, polecat, and witness sessions, use `gc gastown-beads-lite bd`,
+not bare `bd`. ID-based commands can route by prefix. Store-scoped commands
+without a bead ID, such as `list`, `ready`, `formula`, `create`, and `mol seed`,
+need `BEADS_DIR=<rig-root>/.beads` when they should operate on a rig store.
+The agent prompts include `BEADS_DIR` on rig examples as the deterministic form.
 
 ## Notes
 
 `gc sling ... --on mol-polecat-commit` is not enabled as the default dispatch
 path here because current Gas City molecule attachment semantics can conflict
 with beads-lite parent-child dependency validation. The polecat prompt still
-uses `bd formula show mol-polecat-commit` as the worker recipe for direct
-commit coding work.
+uses `gc gastown-beads-lite bd formula show mol-polecat-commit` as the worker
+recipe for direct commit coding work.
