@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_bd_lite() {
+  if [ -n "${GC_BEADS_LITE_BD:-}" ] && [ -x "${GC_BEADS_LITE_BD:-}" ]; then
+    printf '%s\n' "$GC_BEADS_LITE_BD"
+    return
+  fi
+  if [ -n "${BEADS_LITE_BD:-}" ] && [ -x "${BEADS_LITE_BD:-}" ]; then
+    printf '%s\n' "$BEADS_LITE_BD"
+    return
+  fi
+  if command -v bd-lite >/dev/null 2>&1; then
+    command -v bd-lite
+    return
+  fi
+  echo "bd wrapper: bd-lite not found in PATH" >&2
+  exit 127
+}
+
+BD_LITE="$(resolve_bd_lite)"
+
+export BD_EXPORT_AUTO=false
+export BD_NAME="${BD_NAME:-bd}"
+
+has_db=0
+for arg in "$@"; do
+  case "$arg" in
+    --db|--db=*)
+      has_db=1
+      ;;
+  esac
+done
+
+if [ -n "${BEADS_DIR:-}" ]; then
+  mkdir -p "$BEADS_DIR"
+  chmod 700 "$BEADS_DIR" 2>/dev/null || true
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$BEADS_DIR/gc-beads-lite.lock"
+    flock 9
+  fi
+  if [ "$has_db" -eq 0 ]; then
+    "$BD_LITE" --db "$BEADS_DIR/beads.sqlite3" "$@" 9>&-
+    exit $?
+  fi
+fi
+
+"$BD_LITE" "$@" 9>&-

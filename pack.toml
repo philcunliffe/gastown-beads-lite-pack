@@ -1,0 +1,13 @@
+[pack]
+name = "gastown-beads-lite"
+schema = 2
+
+[[named_session]]
+template = "mayor"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"

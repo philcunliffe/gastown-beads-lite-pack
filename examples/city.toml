@@ -1,0 +1,32 @@
+[workspace]
+
+[beads]
+provider = "exec:/absolute/path/to/my-city/packs/gastown-beads-lite-pack/assets/scripts/gc-beads-lite.sh"
+
+[[rigs]]
+name = "my-rig"
+prefix = "mr"
+default_sling_target = "my-rig/gastown-beads-lite.polecat"
+
+[rigs.imports.gastown-beads-lite]
+source = "packs/gastown-beads-lite-pack"
+
+[orders]
+skip = [
+  "cross-rig-deps",
+  "dolt-gc-nudge",
+  "dolt-health",
+  "dolt-remotes-patrol",
+  "gate-sweep",
+  "mol-dog-backup",
+  "mol-dog-compactor",
+  "mol-dog-doctor",
+  "mol-dog-jsonl",
+  "mol-dog-phantom-db",
+  "mol-dog-reaper",
+  "mol-dog-stale-db",
+  "orphan-sweep",
+  "prune-branches",
+  "spawn-storm-detect",
+  "wisp-compact",
+]

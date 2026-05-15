@@ -1,0 +1,13 @@
+[pack]
+name = "my-city"
+schema = 2
+
+[imports.gastown-beads-lite]
+source = "packs/gastown-beads-lite-pack"
+
+[defaults.rig.imports.gastown-beads-lite]
+source = "packs/gastown-beads-lite-pack"
+
+[[named_session]]
+template = "mayor"
+mode = "always"

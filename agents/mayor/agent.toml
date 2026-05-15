@@ -1,0 +1,8 @@
+scope = "city"
+nudge = "Check city status and bead work."
+idle_timeout = "1h"
+max_active_sessions = 1
+
+[env]
+PATH = "{{.ConfigDir}}/assets/bin:$PATH"
+BD_NAME = "bd"
