@@ -62,6 +62,26 @@ bd_json() {
   BD_EXPORT_AUTO=false BEADS_DIR="$BEADS_DIR_PATH" "$BD_BIN" --db "$DB_FILE" --json "$@" 9>&-
 }
 
+bd_cmd_timeout() {
+  local seconds="${GC_BEADS_LITE_CONFIG_TIMEOUT:-10}"
+  if [ "$seconds" != "0" ] && command -v timeout >/dev/null 2>&1; then
+    BD_EXPORT_AUTO=false BEADS_DIR="$BEADS_DIR_PATH" timeout "$seconds" "$BD_BIN" --db "$DB_FILE" "$@" 9>&-
+    return
+  fi
+  bd_cmd "$@"
+}
+
+ensure_custom_types() {
+  local current
+  current="$(bd_cmd_timeout config get types.custom 2>/dev/null || true)"
+  if [ "$current" = "$CUSTOM_TYPES" ]; then
+    return
+  fi
+  if ! bd_cmd_timeout config set types.custom "$CUSTOM_TYPES" >/dev/null; then
+    echo "gc-beads-lite: warning: failed to configure types.custom" >&2
+  fi
+}
+
 ensure_store() {
   mkdir -p "$BEADS_DIR_PATH"
   chmod 700 "$BEADS_DIR_PATH" 2>/dev/null || true
@@ -78,7 +98,7 @@ ensure_store() {
     bd_cmd init --quiet --prefix "$PREFIX" >/dev/null
   fi
 
-  bd_cmd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1 || true
+  ensure_custom_types
 }
 
 health_store() {
