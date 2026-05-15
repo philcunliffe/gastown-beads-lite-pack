@@ -81,6 +81,10 @@ gc gastown-beads-lite bd create "city-level task"
 gc gastown-beads-lite bd show <id>
 ```
 
+Commands that name a bead ID route by prefix across the city and registered
+rig stores, so `gc gastown-beads-lite bd show az-123` runs against the rig
+whose prefix is `az`.
+
 Inside mayor, polecat, and witness sessions, `bd` resolves to this pack's
 wrapper and uses the session's `BEADS_DIR` when one is set.
 
