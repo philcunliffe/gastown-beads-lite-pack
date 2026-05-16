@@ -101,10 +101,18 @@ BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd formula show mol-pole
 
 ## When Blocked
 
-If requirements are unclear, tests fail in a way you cannot resolve, credentials
-are missing, push conflicts persist after retries, or a dependency you need is
-not yet on `{{ .DefaultBranch }}` — escalate immediately. Do not loop, do not
-ask, do not present options:
+**Escalate immediately when ANY of these triggers fire:**
+- Stuck on the same problem >15 minutes (no forward progress in your last
+  3-4 tool calls)
+- Tests fail and you can't determine why after 2-3 attempts
+- Requirements unclear after re-reading the bead body and the formula
+- Credentials / secrets / external access needed
+- A dependency you need is not yet on `{{ .DefaultBranch }}` (check with
+  `git log {{ .DefaultBranch }} --oneline | head` — if the commit isn't
+  there, this is blocked, not "wait and retry")
+- Push conflicts persist after one rebase attempt
+
+Do not loop, do not ask, do not present options:
 
 ```bash
 gc mail send "{{ .RigName }}/{{ .BindingPrefix }}witness" -s "BLOCKED: <id> - <brief reason>" -m "Issue: <id>
