@@ -43,6 +43,15 @@ up for repair.
 Default merge method is `--squash` to keep the integration branch linear.
 Set `{{pr_merge_method}}` to `merge`, `rebase`, or `squash` to match the
 host repo's convention.
+
+## Feature-Flow Auto-Routing (gb-RTR)
+
+For beads carrying `metadata.feature_phase` (the autonomous feature flow),
+the `post-merge-route` step runs after a successful merge and decides
+whether to file the next phase bead — `review`, `ship`, or `fix-rollup`.
+Routing fires only on the last merge for an integration branch (no other
+open beads share the same `metadata.target`). Beads without
+`metadata.feature_phase` skip routing.
 """
 formula = "mol-feature-refinery-patrol"
 version = 1
@@ -520,9 +529,194 @@ git branch -D "$RUN_BRANCH" 2>/dev/null || true
 deleted on origin, local `$TARGET` reset to the merged tip."""
 
 [[steps]]
+id = "post-merge-route"
+title = "Route the next feature-flow bead on last-merge detection"
+needs = ["merge"]
+description = """
+After a per-bead merge succeeds, decide whether this was the last merge for
+the integration branch (`$TARGET`). If so, file the next bead in the
+autonomous feature flow — review, ship, or fix-rollup — so the loop advances
+without a human. If sibling beads are still open, this step is a no-op.
+
+Beads outside the feature flow (no `metadata.feature_phase` set) skip
+routing entirely.
+
+This step must never crash the refinery patrol — the per-bead merge already
+succeeded and must still be recorded by `close-bead`. On any routing
+failure, route the current bead to the rig witness and mail, then continue.
+
+## Skip when no feature_phase is set
+
+```bash
+PHASE=$(bd show "$WORK" --json | jq -r '.[0].metadata.feature_phase // empty')
+PR=$(bd show "$WORK" --json | jq -r '.[0].metadata.pr // empty')
+
+if [ -z "$PHASE" ]; then
+    echo "post-merge-route: no feature_phase on bead; routing not applicable."
+    # Close this step.
+fi
+```
+
+## Last-merge detection
+
+Query any other open beads sharing this `metadata.target`. Exclude `$WORK`
+because the bead is still `in_progress` at this point (`close-bead` runs
+next).
+
+```bash
+OPEN_SIBLINGS=$(bd list --status=open,in_progress --json | \
+    jq --arg t "$TARGET" --arg w "$WORK" \
+       '[.[] | select(.metadata.target == $t and .id != $w)] | length')
+
+if [ "$OPEN_SIBLINGS" != "0" ]; then
+    echo "post-merge-route: $OPEN_SIBLINGS open sibling(s) remain for $TARGET; not the last merge."
+    # Close this step.
+fi
+```
+
+## Route based on phase
+
+Resolve the polecat and witness targets, and define the helper that files
+the next bead with the canonical routing metadata.
+
+```bash
+POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"
+ROUTE_ERR=""
+NEW_BEAD=""
+
+# Helper: create the next-phase bead and stamp the canonical metadata.
+# Sets $NEW_BEAD on success; returns non-zero on failure.
+write_next_bead() {
+    local title="$1"; local phase="$2"; local formula="$3"; local body="$4"
+    local body_file
+    body_file=$(mktemp -t fr-body.XXXXXX.md)
+    printf '%s\\n' "$body" > "$body_file"
+    NEW_BEAD=$(bd create "$title" --description-file "$body_file" --json \
+        | jq -r '.id // .[0].id // empty')
+    rm -f "$body_file"
+    if [ -z "$NEW_BEAD" ] || [ "$NEW_BEAD" = "null" ]; then
+        NEW_BEAD=""
+        return 1
+    fi
+    bd update "$NEW_BEAD" \
+      --set-metadata target="$TARGET" \
+      --set-metadata feature_phase="$phase" \
+      --set-metadata formula="$formula" \
+      --set-metadata gc.routed_to="$POLECAT_TARGET" \
+      --set-metadata pr="$PR" \
+      --set-metadata integration_branch="$TARGET"
+    if [ -n "$FINAL_TARGET" ]; then
+        bd update "$NEW_BEAD" --set-metadata final_target="$FINAL_TARGET"
+    fi
+}
+```
+
+### `work` → file review bead
+
+```bash
+case "$PHASE" in
+    work)
+        write_next_bead "Feature review: $TARGET" review mol-feature-review \
+"Auto-filed by gb-RTR after the final work-bead merged for $TARGET.
+
+Run the outgoing-PR scorecard against draft PR #$PR (head: $TARGET).
+On approve, gb-RTR files the ship bead. On request_changes or block,
+mol-feature-review files a rollup fix bead targeting $TARGET — and once
+that fix merges, gb-RTR fires again to file the ship bead." \
+          || ROUTE_ERR="bd create failed for review bead (phase=work)"
+        ;;
+```
+
+### `review` → file ship bead (only on `approve` verdict)
+
+`mol-feature-review` writes `verdict: <approve|request_changes|block>` into
+the review bead's notes. On non-approve, that formula has already filed
+the rollup fix bead, so routing has nothing to do.
+
+```bash
+    review)
+        VERDICT=$(bd show "$WORK" --json | jq -r '.[0].notes // ""' \
+            | grep -m1 '^verdict:' | sed 's/^verdict: *//')
+        case "$VERDICT" in
+            approve)
+                write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
+"Auto-filed by gb-RTR after review approve for $TARGET.
+
+Run mol-feature-ship against draft PR #$PR. On all-green, the formula
+flips the draft PR to ready-for-review (gh pr ready)." \
+                  || ROUTE_ERR="bd create failed for ship bead (phase=review approve)"
+                ;;
+            request_changes|block)
+                echo "post-merge-route: review verdict=$VERDICT — mol-feature-review filed the rollup fix bead; nothing to route."
+                ;;
+            "")
+                ROUTE_ERR="phase=review but verdict missing from notes"
+                ;;
+            *)
+                ROUTE_ERR="phase=review but verdict='$VERDICT' is unrecognized"
+                ;;
+        esac
+        ;;
+```
+
+### `fix` → file ship bead (no re-review)
+
+Per gb-RTR spec, the rollup fix is not re-reviewed; it goes straight to
+ship.
+
+```bash
+    fix)
+        write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
+"Auto-filed by gb-RTR after the rollup fix merged for $TARGET.
+
+Per spec, no re-review runs. Run mol-feature-ship against draft PR #$PR." \
+          || ROUTE_ERR="bd create failed for ship bead (phase=fix)"
+        ;;
+```
+
+### `ship` → terminal phase
+
+```bash
+    ship)
+        echo "post-merge-route: phase=ship — autonomous loop terminates; mol-feature-ship handles the human handoff."
+        ;;
+
+    *)
+        ROUTE_ERR="unrecognized feature_phase='$PHASE'"
+        ;;
+esac
+```
+
+## Failure handling
+
+If routing failed, route the current bead to the rig witness and mail. Do
+not crash — `close-bead` still has to record the merge.
+
+```bash
+if [ -n "$ROUTE_ERR" ]; then
+    bd update "$WORK" --set-metadata gc.routed_to="$WITNESS_TARGET"
+    gc mail send "$WITNESS_TARGET" \
+        -s "ROUTE FAILED: $WORK (phase=$PHASE, target=$TARGET)" \
+        -m "Bead: $WORK
+Phase: $PHASE
+Target: $TARGET
+Reason: $ROUTE_ERR
+
+The per-bead merge succeeded but the feature-flow routing could not file
+the next bead. Human triage required to resume the autonomous loop."
+fi
+```
+
+**Exit criteria:** Either (a) the next-phase bead exists with full routing
+metadata, OR (b) routing was a no-op (no `feature_phase`, open siblings
+remain, ship phase, or review without approve), OR (c) a witness mail has
+been sent and the current bead is routed to the witness."""
+
+[[steps]]
 id = "close-bead"
 title = "Record merge metadata and close the bead"
-needs = ["merge"]
+needs = ["post-merge-route"]
 description = """
 Record the durable merge result and close the bead. The downstream
 `integration -> final_target` PR (the human-review surface for the full
