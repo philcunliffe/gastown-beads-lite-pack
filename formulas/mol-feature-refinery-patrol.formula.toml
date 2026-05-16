@@ -585,6 +585,18 @@ WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"
 ROUTE_ERR=""
 NEW_BEAD=""
 
+# Helper: does a next-phase bead already exist for this target?
+# Returns the bead ID if found, empty otherwise. Used to keep this step
+# idempotent — if close-bead failed last run and the formula re-fires,
+# we must not file a second next-phase bead for the same target.
+next_phase_bead_exists() {
+    local target="$1"
+    local phase="$2"
+    bd list --status=open,in_progress --json | \
+        jq -r --arg t "$target" --arg p "$phase" \
+           '[.[] | select(.metadata.target == $t and .metadata.feature_phase == $p)] | .[0].id // empty'
+}
+
 # Helper: create the next-phase bead and stamp the canonical metadata.
 # Sets $NEW_BEAD on success; returns non-zero on failure.
 write_next_bead() {
@@ -617,14 +629,19 @@ write_next_bead() {
 ```bash
 case "$PHASE" in
     work)
-        write_next_bead "Feature review: $TARGET" review mol-feature-review \
+        EXISTING=$(next_phase_bead_exists "$TARGET" review)
+        if [ -n "$EXISTING" ]; then
+            echo "post-merge-route: review bead $EXISTING already exists for $TARGET; skipping (idempotent)."
+        else
+            write_next_bead "Feature review: $TARGET" review mol-feature-review \
 "Auto-filed by gb-RTR after the final work-bead merged for $TARGET.
 
 Run the outgoing-PR scorecard against draft PR #$PR (head: $TARGET).
 On approve, gb-RTR files the ship bead. On request_changes or block,
 mol-feature-review files a rollup fix bead targeting $TARGET — and once
 that fix merges, gb-RTR fires again to file the ship bead." \
-          || ROUTE_ERR="bd create failed for review bead (phase=work)"
+              || ROUTE_ERR="bd create failed for review bead (phase=work)"
+        fi
         ;;
 ```
 
@@ -640,12 +657,17 @@ the rollup fix bead, so routing has nothing to do.
             | grep -m1 '^verdict:' | sed 's/^verdict: *//')
         case "$VERDICT" in
             approve)
-                write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
+                EXISTING=$(next_phase_bead_exists "$TARGET" ship)
+                if [ -n "$EXISTING" ]; then
+                    echo "post-merge-route: ship bead $EXISTING already exists for $TARGET; skipping (idempotent)."
+                else
+                    write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
 "Auto-filed by gb-RTR after review approve for $TARGET.
 
 Run mol-feature-ship against draft PR #$PR. On all-green, the formula
 flips the draft PR to ready-for-review (gh pr ready)." \
-                  || ROUTE_ERR="bd create failed for ship bead (phase=review approve)"
+                      || ROUTE_ERR="bd create failed for ship bead (phase=review approve)"
+                fi
                 ;;
             request_changes|block)
                 echo "post-merge-route: review verdict=$VERDICT — mol-feature-review filed the rollup fix bead; nothing to route."
@@ -667,11 +689,16 @@ ship.
 
 ```bash
     fix)
-        write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
+        EXISTING=$(next_phase_bead_exists "$TARGET" ship)
+        if [ -n "$EXISTING" ]; then
+            echo "post-merge-route: ship bead $EXISTING already exists for $TARGET; skipping (idempotent)."
+        else
+            write_next_bead "Feature ship: $TARGET" ship mol-feature-ship \
 "Auto-filed by gb-RTR after the rollup fix merged for $TARGET.
 
 Per spec, no re-review runs. Run mol-feature-ship against draft PR #$PR." \
-          || ROUTE_ERR="bd create failed for ship bead (phase=fix)"
+              || ROUTE_ERR="bd create failed for ship bead (phase=fix)"
+        fi
         ;;
 ```
 
@@ -723,13 +750,27 @@ Record the durable merge result and close the bead. The downstream
 feature) is opened by a separate workflow when the feature is ready to ship —
 this formula's responsibility ends at per-bead merge.
 
+This step is idempotent: if the bead is already closed (because a previous
+run reached this point and only the bd-call after it failed), skip the
+close and only patch missing metadata. Re-closing would otherwise error
+and tank the patrol on the second pass.
+
 ```bash
-bd update "$WORK" \
-  --set-metadata merge_result=merged_via_pr \
-  --set-metadata merged_sha="$MERGED_SHA" \
-  --set-metadata merged_target="$TARGET" \
-  --unset-metadata rejection_reason
-bd close "$WORK" --reason "PR #$PR_NUMBER merged into $TARGET at $MERGED_SHORT"
+CURRENT_STATUS=$(bd show "$WORK" --json | jq -r '.[0].status')
+if [ "$CURRENT_STATUS" = "closed" ]; then
+    echo "close-bead: $WORK is already closed; skipping (idempotent)."
+    EXISTING_MERGE_RESULT=$(bd show "$WORK" --json | jq -r '.[0].metadata.merge_result // empty')
+    if [ -z "$EXISTING_MERGE_RESULT" ]; then
+        bd update "$WORK" --set-metadata merge_result=merged_via_pr
+    fi
+else
+    bd update "$WORK" \
+      --set-metadata merge_result=merged_via_pr \
+      --set-metadata merged_sha="$MERGED_SHA" \
+      --set-metadata merged_target="$TARGET" \
+      --unset-metadata rejection_reason
+    bd close "$WORK" --reason "PR #$PR_NUMBER merged into $TARGET at $MERGED_SHORT"
+fi
 ```
 
 **Exit criteria:** Bead closed with `pr_url`, `pr_number`, `merged_sha`,
