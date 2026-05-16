@@ -1,0 +1,14 @@
+scope = "city"
+fallback = true
+wake_mode = "fresh"
+work_dir = ".gc/agents/dogs/{{.AgentBase}}"
+nudge = "Run gc hook; it checks assigned warrants first, then routed pool work."
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "gc gastown-beads-lite scale-check {{.AgentBase}} {{.CityRoot}}"
+work_query = "gc gastown-beads-lite work-query {{.AgentBase}} {{.CityRoot}}"
+sling_query = "BEADS_DIR={{.CityRoot}}/.beads gc gastown-beads-lite bd update {} --set-metadata gc.routed_to={{.AgentBase}}"
+
+[env]
+BD_NAME = "bd"

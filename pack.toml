@@ -2,6 +2,19 @@
 name = "gastown-beads-lite"
 schema = 2
 
+# This pack ships its own city-scope dog in agents/dog/. The resolver
+# registers it as `gastown-beads-lite.dog` (qualified by pack name) — it
+# co-exists with the unqualified `dog` from the maintenance system pack,
+# which stays in place as a Dolt-flavored fallback that never gets work
+# in beads-lite cities (all mol-dog-* formulas are listed in
+# `[orders].skip` in beads-lite city.toml files).
+#
+# Cities using this pack should:
+#   1. Route warrants to `gastown-beads-lite.dog` (not the unqualified `dog`)
+#   2. Add the standard `[orders].skip` list to silence dolt formulas
+#   3. Optionally set `shadow = "silent"` on `[imports.gastown-beads-lite]`
+#      in city.toml to suppress the resolver shadow warning
+
 [[named_session]]
 template = "mayor"
 scope = "city"
