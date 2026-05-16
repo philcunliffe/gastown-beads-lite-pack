@@ -52,6 +52,10 @@ default = "gastown-beads-lite."
 description = "Hours of LLM-proxy silence before a polecat is considered stuck"
 default = "2"
 
+[vars.loop_threshold_hours]
+description = "Hours since the last user or tool_result message before a session is considered to be in a tool-call loop"
+default = "0.5"
+
 [vars.mail_stale_minutes]
 description = "Auto-archive protocol mail older than this many minutes"
 default = "30"
@@ -209,16 +213,26 @@ stamped and listed in the patrol-cycle marker file.
 
 [[steps]]
 id = "stuck-session-detection"
-title = "Detect stuck polecat sessions"
+title = "Detect stuck polecat or refinery sessions"
 needs = ["inbox-drain"]
 description = """
-The controller only detects dead sessions. A polecat that is alive but
-frozen at an interactive prompt or wedged in a tool call is invisible to
-the bead store: the bead stays `in_progress` while no work happens.
+The controller only detects dead sessions. A polecat or refinery that is
+alive but frozen at an interactive prompt or wedged in a tool call is
+invisible to the bead store: the bead stays `in_progress` while no work
+happens.
 
-Detect this via the local LLM-proxy recordings: if a polecat's cwd has
-emitted no LLM exchange in `{{stuck_threshold_hours}}` hours while its
-bead is still in flight, it is stuck.
+Detect this via the local LLM-proxy recordings using two signals:
+
+- **Total silence** — a session's cwd has emitted no LLM exchange in
+  `{{stuck_threshold_hours}}` hours while its bead is still in flight.
+- **External-progress silence** — a session has been generating LLM
+  exchanges but has received no user or tool_result message in
+  `{{loop_threshold_hours}}` hours, indicating a tool-call loop with no
+  forward progress.
+
+Both polecats and refineries can hit these states. City-scope agents
+(mayor, dog) have cwds that don't contain `$GC_RIG` and are not flagged
+here — they need a separate watchdog.
 
 **1. List in-progress beads in this rig:**
 
@@ -228,25 +242,63 @@ bd list \\
     > /tmp/witness-active-beads.json
 ```
 
-**2. Query proxy recordings for stuck polecat sessions:**
+**2. Query proxy recordings for stuck polecat or refinery sessions:**
+
+The query covers BOTH polecat and refinery cwds in this rig, excludes the
+witness's own cwd (so the patrol doesn't flag itself), and ORs two signals
+together: total LLM silence (any session that has gone quiet) and
+external-progress silence (a session still generating exchanges but with no
+incoming user or tool_result message — typically a tool-call loop).
+
+The `proxy_messages.role` column was renamed to `message_type` in some ctvs
+versions. Autodetect which is present; if neither, fall back to total-
+silence detection only and log a WARN.
 
 ```bash
 TODAY=$(date -u +%Y-%m-%d)
 YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
+
+SCHEMA=$(ctvs query sql "PRAGMA table_info(proxy_messages)" --format json --date "$TODAY" 2>/dev/null || echo "[]")
+if echo "$SCHEMA" | jq -e '.[] | select(.name == "role")' >/dev/null 2>&1; then
+    ROLE_COL="role"
+elif echo "$SCHEMA" | jq -e '.[] | select(.name == "message_type")' >/dev/null 2>&1; then
+    ROLE_COL="message_type"
+else
+    echo "stuck-detection: WARN: proxy_messages has neither role nor message_type column; falling back to full-silence detection only" >&2
+    ROLE_COL=""
+fi
+
+if [ -n "$ROLE_COL" ]; then
+    EXT_INPUT_FILTER="MAX(CASE WHEN $ROLE_COL IN ('user', 'tool_result') THEN message_created_at END) AS last_external_input,"
+    EXT_INPUT_PREDICATE="OR last_external_input < NOW() - INTERVAL '{{loop_threshold_hours}} hours'"
+else
+    EXT_INPUT_FILTER=""
+    EXT_INPUT_PREDICATE=""
+fi
+
+WITNESS_CWD="${PWD:-$(pwd)}"
+
 ctvs query sql "
-    SELECT cwd, MAX(message_created_at) AS last_activity, COUNT(*) AS parts
+    SELECT cwd,
+           MAX(message_created_at) AS last_any,
+           $EXT_INPUT_FILTER
+           COUNT(*) AS parts
     FROM proxy_messages
-    WHERE cwd LIKE '%/polecats/%' AND cwd LIKE '%$GC_RIG%'
+    WHERE (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
+      AND cwd LIKE '%$GC_RIG%'
+      AND cwd != '$WITNESS_CWD'
     GROUP BY cwd
-    HAVING last_activity < NOW() - INTERVAL '{{stuck_threshold_hours}} hours'
-    ORDER BY last_activity ASC
+    HAVING last_any < NOW() - INTERVAL '{{stuck_threshold_hours}} hours'
+       $EXT_INPUT_PREDICATE
+    ORDER BY last_any ASC
 " --format json --date "$TODAY" --date "$YESTERDAY" \\
     > /tmp/witness-stuck.json 2>/dev/null || echo '[]' > /tmp/witness-stuck.json
 ```
 
 If `ctvs query` is unavailable or errors, fall back to `gc session peek`:
-open each polecat session, look at the last 80 lines; if they end with an
-unanswered tool prompt or an `AskUserQuestion`-style UI, treat as stuck.
+open each polecat or refinery session, look at the last 80 lines; if they
+end with an unanswered tool prompt or an `AskUserQuestion`-style UI, treat
+as stuck.
 
 **3. For each stuck cwd, cross-reference with the active-beads list and
 escalate ONCE per stuck session per patrol.** Each escalation produces
@@ -257,11 +309,24 @@ durable record), a mail to mayor (human visibility), and a
 ```bash
 jq -c '.[]' /tmp/witness-stuck.json | while read -r row; do
     CWD=$(echo "$row" | jq -r '.cwd')
-    LAST=$(echo "$row" | jq -r '.last_activity')
-    # Find the bead whose worktree matches CWD
+    LAST=$(echo "$row" | jq -r '.last_any')
+    # Find the bead whose worktree matches CWD (polecats record work_dir)
     BEAD=$(jq -r --arg cwd "$CWD" \\
         '.[] | select(.metadata.work_dir == $cwd) | .id' \\
         /tmp/witness-active-beads.json | head -1)
+    # Fallback: refinery sessions may not record metadata.work_dir on
+    # their bead; if the stuck cwd looks like a refinery, identify the
+    # bead via assignee match instead.
+    if [ -z "$BEAD" ]; then
+        case "$CWD" in
+            */refinery*)
+                REFINERY_AGENT="$GC_RIG/{{binding_prefix}}refinery"
+                BEAD=$(jq -r --arg a "$REFINERY_AGENT" \\
+                    '.[] | select(.assignee == $a) | .id' \\
+                    /tmp/witness-active-beads.json | head -1)
+                ;;
+        esac
+    fi
     [ -z "$BEAD" ] && continue
     # Skip if we already escalated this bead in a recent patrol
     EXISTING=$(bd show "$BEAD" --json \\

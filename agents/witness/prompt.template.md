@@ -105,33 +105,56 @@ above. It sequences six steps:
 
 A polecat or refinery sitting at an interactive prompt or otherwise frozen is
 invisible to the bead store — the bead stays `in_progress` and no progress
-appears. Detect this by querying the local LLM-proxy recordings for sessions
-that haven't emitted any LLM exchange in N hours while their bead is still
-open or in_progress.
+appears. The patrol watches BOTH polecat and refinery cwds in this rig (the
+witness excludes its own cwd so it doesn't flag itself), and applies two
+signals against the local LLM-proxy recordings:
+
+- **Total silence** — `MAX(message_created_at)` over the cwd is older than
+  the stuck threshold (default 2h). The session has gone completely quiet.
+- **External-progress silence** — the most recent user or tool_result
+  message is older than the loop threshold (default 0.5h) while the session
+  is still emitting LLM exchanges. The session is generating tool calls in
+  a loop with no forward progress.
+
+The `proxy_messages.role` column was renamed to `message_type` in some
+ctvs versions; the formula autodetects which is present and falls back to
+total-silence detection only if neither exists.
+
+City-scope agents (mayor, dog) have cwds that don't contain `$GC_RIG` and
+are NOT flagged here. A separate watchdog or mayor-side periodic check
+covers those.
 
 ```bash
 # 1. List currently-open / in-progress beads in this rig
 BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd list \
     --status in_progress --json --limit=30 > /tmp/witness-active-beads.json
 
-# 2. For each active bead with an assigned polecat, query the proxy
-#    recordings for that polecat's cwd. If MAX(message_created_at) was
-#    more than 2 hours ago, the session is stuck.
+# 2. Query proxy recordings for stuck polecat or refinery sessions. The
+#    full query (schema autodetect, two-signal HAVING clause, WITNESS_CWD
+#    self-exclusion) lives in mol-witness-patrol step 3.
 TODAY=$(date -u +%Y-%m-%d)
 YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
-ctvs query sql "SELECT cwd, MAX(message_created_at) AS last_activity, COUNT(*) AS parts
+WITNESS_CWD="${PWD:-$(pwd)}"
+ctvs query sql "SELECT cwd, MAX(message_created_at) AS last_any, COUNT(*) AS parts
 FROM proxy_messages
-WHERE cwd LIKE '%/polecats/%' AND cwd LIKE '%{{ .RigName }}%'
+WHERE (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
+  AND cwd LIKE '%{{ .RigName }}%'
+  AND cwd != '$WITNESS_CWD'
 GROUP BY cwd
-HAVING last_activity < NOW() - INTERVAL '2 hours'
-ORDER BY last_activity ASC" \
+HAVING last_any < NOW() - INTERVAL '2 hours'
+ORDER BY last_any ASC" \
     --format json --date "$TODAY" --date "$YESTERDAY" > /tmp/witness-stuck.json 2>/dev/null
 ```
 
-For each stuck cwd found, cross-reference with the active beads list. If the
-polecat's cwd corresponds to a bead still `in_progress`, produce THREE
-artifacts: a STUCK warrant routed to the dog (action), a mail to mayor
-(human visibility), and a `witness_stuck_flagged_at` stamp (dedupe):
+For each stuck cwd found, cross-reference with the active beads list to
+find the associated bead. Polecats record `metadata.work_dir` on their
+bead, so match cwd against work_dir first. Refinery sessions may not
+record work_dir; if the cwd looks like a refinery (`*/refinery*`) and the
+work_dir match fails, fall back to matching by assignee
+(`$GC_RIG/{{ .BindingPrefix }}refinery`). If the cwd corresponds to a bead
+still `in_progress`, produce THREE artifacts: a STUCK warrant routed to
+the dog (action), a mail to mayor (human visibility), and a
+`witness_stuck_flagged_at` stamp (dedupe):
 
 ```bash
 # 1. Mail mayor for human visibility (kept even though the dog will act —
