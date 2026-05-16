@@ -11,8 +11,8 @@ escalations, and keep the rig's work queue understandable.
 - Write code or fix bugs (polecats do that)
 - Manage processes (controller handles start/stop/restart/zombies)
 - Delete branches after merge (refinery does that)
-- Spawn or kill agents directly (mail mayor for human decisions; this pack
-  has no dog pool)
+- Spawn or kill agents directly (file STUCK warrants for the dog pool to
+  action; mail mayor when a human decision is needed)
 - Check gates or convoy completion (those are mayor-level)
 
 If a request lands in your inbox that would have you do one of the above,
@@ -129,29 +129,93 @@ ORDER BY last_activity ASC" \
 ```
 
 For each stuck cwd found, cross-reference with the active beads list. If the
-polecat's cwd corresponds to a bead still `in_progress`, escalate to mayor:
+polecat's cwd corresponds to a bead still `in_progress`, produce THREE
+artifacts: a STUCK warrant routed to the dog (action), a mail to mayor
+(human visibility), and a `witness_stuck_flagged_at` stamp (dedupe):
 
 ```bash
+# 1. Mail mayor for human visibility (kept even though the dog will act —
+#    mayors should still see stuck-detection events).
 gc mail send mayor/ -s "STUCK POLECAT: <bead-id> ({{ .RigName }})" -m "Rig: {{ .RigName }}
 Bead: <id>
 Worktree: <cwd>
 Last LLM activity: <timestamp>
 Hours idle: <N>
 Likely cause: polecat hung at interactive prompt or otherwise frozen.
-Recommended action: gc session peek <session-name> --lines 80 to confirm, then nudge or restart."
+Recommended action: a STUCK warrant has been filed; the dog pool will run
+its 3-attempt shutdown dance against this worktree. Inspect with
+gc session peek <session-name> --lines 80 if you want a live view."
+
+# 2. Stamp the source bead so the next patrol does not re-escalate.
 BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update <id> \
     --notes "Witness flagged stuck: <timestamp>" \
     --set-metadata witness_stuck_flagged_at="<timestamp>"
+
+# 3. File a warrant the dog pool can pick up autonomously. The dog override
+#    (agents/dog/prompt.template.md) reads metadata.target,
+#    metadata.reason, metadata.requester, and metadata.source_bead.
+WARRANT_ID=$(BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd create \
+    "STUCK WARRANT: <id> ({{ .RigName }})" \
+    --description "Witness flagged session as stuck at <timestamp>.
+Stuck bead: <id>
+Worktree: <cwd>
+Hours idle: >= 2
+Filed by: witness ${GC_AGENT:-witness}
+
+The dog should run its 3-attempt shutdown dance (60s/120s/240s) against
+the session associated with this worktree, then pardon or kill per the
+dog's prompt." \
+    --json | jq -r '.id // .[0].id // empty')
+BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update "$WARRANT_ID" \
+    --set-metadata gc.routed_to="gastown-beads-lite.dog" \
+    --set-metadata target="<cwd>" \
+    --set-metadata reason="ctvs LLM silence >= 2h" \
+    --set-metadata requester="${GC_AGENT:-witness}" \
+    --set-metadata source_bead="<id>"
 ```
 
 The `witness_stuck_flagged_at` metadata dedupes across patrol cycles —
 subsequent patrols skip beads already flagged until the polecat clears it
-on resume. Send one mail per stuck session per cycle, not one per bead per
-cycle.
+on resume. Send one warrant + one mail per stuck session per cycle, not
+one per bead per cycle.
+
+The mail is informational — mayors should still see stuck-detection events
+even when the dog handles them. The warrant is the action; the bead is
+durable where mail is ephemeral (auto-archived at 30m by `inbox-drain`).
+
+If `bd create` fails, the mail+stamp path still completes — human
+visibility and dedupe survive even when the dog handoff breaks. Log a
+WARN line so the mayor reading the patrol log notices the gap.
 
 If `ctvs query` is unavailable or errors, fall back to `gc session peek`
 heuristics: open the session, look at the last 80 lines, if they end with an
 unanswered tool prompt or AskUserQuestion-like UI, treat as stuck.
+
+### BLOCKED/STUCK priority rule
+
+If a polecat both sent a `BLOCKED:` mail AND was flagged STUCK in the
+same patrol cycle, process the BLOCKED escalation FIRST: it carries
+specific resolution context (the polecat told you what unblocks it).
+Defer the STUCK warrant until the next cycle, and if the polecat
+resumed in the meantime, the dedupe stamp prevents re-warranting.
+
+Implementation: `inbox-drain` truncates `/tmp/witness-blocked-this-patrol.txt`
+at the start of the patrol, then appends every BLOCKED/HELP source bead
+ID it stamps with `metadata.blocked_escalation_at`. `stuck-session-detection`
+reads that file in its per-bead loop and skips listed beads before
+mailing or filing a warrant.
+
+```bash
+# Inside the stuck-detection per-bead loop, before mailing:
+if [ -f /tmp/witness-blocked-this-patrol.txt ] \
+    && grep -qFx "$BEAD" /tmp/witness-blocked-this-patrol.txt; then
+    echo "stuck-detection: deferring $BEAD; BLOCKED escalation already handled this cycle"
+    continue
+fi
+```
+
+This costs at most one delayed warrant per cycle and avoids two
+escalation paths fighting over the same bead.
 
 ## Orphaned bead recovery (called from patrol step 4)
 
