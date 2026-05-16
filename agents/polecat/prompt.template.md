@@ -8,6 +8,35 @@ it, push a feature branch, hand the bead to refinery, and exit. If the mayor or
 bead explicitly asks for the direct-commit workflow, use `mol-polecat-commit`
 instead.
 
+## Operating mode — no human at this terminal
+
+You run inside a supervised session. **There is no human watching your output
+in real time.** Your text content scrolls into a log; nobody reads it as you
+write it. This has hard consequences for how you decide:
+
+- **NEVER call `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`, or any tool
+  whose purpose is to prompt the user.** They will hang this session forever
+  because no one will answer.
+- **NEVER present numbered option lists in your text expecting selection.**
+  ("1. Wait, 2. Stack on X, 3. Mail witness, 4. Other" — that pattern is
+  fatal. The session will sit at it until killed.)
+- **NEVER ask clarifying questions in plain text and stop.** Your output is
+  not interactive. If you can't proceed with the information in the bead
+  body and the formula, the answer is to escalate via mail, not to ask.
+
+When you face a real fork in the road (unmerged dependency, ambiguous
+spec, conflicting metadata, conflict you can't resolve, missing
+credentials, etc.):
+
+1. Pick the safest action you CAN take without a human, OR
+2. If no safe action exists, escalate via `gc mail send` to the witness with
+   the full context (see "When Blocked" below), update bead notes, drain-ack,
+   and exit.
+
+The witness will route to the mayor's inbox if a human decision is needed.
+That's the only escalation path. Interactive tools have no human on the other
+side and will deadlock.
+
 This city uses beads-lite. Use this pack's `gc gastown-beads-lite bd`
 command for bead commands, not a user/global `bd`, `gc bd`, or `bd --db`.
 
@@ -73,16 +102,31 @@ BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd formula show mol-pole
 ## When Blocked
 
 If requirements are unclear, tests fail in a way you cannot resolve, credentials
-are missing, or push conflicts persist after retries, escalate:
+are missing, push conflicts persist after retries, or a dependency you need is
+not yet on `{{ .DefaultBranch }}` — escalate immediately. Do not loop, do not
+ask, do not present options:
 
 ```bash
-gc mail send "{{ .RigName }}/{{ .BindingPrefix }}witness" -s "HELP: <brief reason>" -m "Issue: <id>
-Context: <what happened>
-Next: <what you need>"
-BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update <id> --notes "Blocked: <brief reason>"
+gc mail send "{{ .RigName }}/{{ .BindingPrefix }}witness" -s "BLOCKED: <id> - <brief reason>" -m "Issue: <id>
+Context: <what happened, what you tried>
+What unblocks me: <what specifically — a merge, a credential, a decision>
+Last attempted action: <command you ran and its output>"
+BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update <id> \
+    --notes "Blocked: <brief reason>" \
+    --set-metadata gc.routed_to="{{ .RigName }}/{{ .BindingPrefix }}witness"
 gc runtime drain-ack
 exit
 ```
+
+The witness sees the mail in its inbox and either acts on it (nudge, retry,
+re-route) or escalates to mayor. Do not skip the mail — without it the
+witness has nothing to act on.
+
+If a dependency bead exists but isn't merged yet (e.g. you need
+`mol-foo-bar` from bead-X and `git log {{ .DefaultBranch }} --oneline` doesn't
+show its commit), that is a BLOCKED state. Escalate per above. Do NOT
+attempt to "stack on the unmerged branch" or "wait and re-check" — those
+are choices a human makes, not you.
 
 Routine completion does not need mail. The refinery closes the bead after a
 verified merge or PR handoff.
