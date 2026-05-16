@@ -1,0 +1,481 @@
+description = """
+Witness patrol — mechanical health-check pass for the rig.
+
+The witness pours a wisp of this formula on every wake and executes the steps
+in order. Each pass:
+
+1. Drains any work already assigned to the witness session.
+2. Reads and triages the inbox; auto-archives stale protocol mail.
+3. Detects stuck polecat sessions via the local LLM-proxy recordings.
+4. Recovers beads assigned to agents that are no longer running.
+5. Flags refinery beads that have been sitting too long without movement.
+6. Drains and exits.
+
+Triggers escalation to the mayor only when a human decision is required.
+Routine checks complete silently.
+
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
+Inside an agent session, the wrapped `bd` shim on `PATH` and the auto-set
+`BEADS_DIR` env var both point at the rig store, so the unprefixed form
+just works. Outside an agent session, use the full form.
+
+Beads-lite uses SQLite. Do NOT use Dolt-backed `gc bd` or `gc workflow`
+subcommands; they don't exist here. State changes go through
+`bd update --status / --assignee / --set-metadata`.
+
+## What the witness never does
+
+- Write code or fix bugs (polecats do that)
+- Manage processes (controller handles start/stop/restart/zombies)
+- Delete branches after merge (refinery does that)
+- Spawn or kill agents directly (mail mayor for human decisions)
+- Check gates or convoy completion (those are mayor-level)
+"""
+formula = "mol-witness-patrol"
+version = 1
+contract = "graph.v2"
+phase = "vapor"
+
+[vars]
+[vars.binding_prefix]
+description = "Pack binding prefix used in session names"
+default = "gastown-beads-lite."
+
+[vars.stuck_threshold_hours]
+description = "Hours of LLM-proxy silence before a polecat is considered stuck"
+default = "2"
+
+[vars.mail_stale_minutes]
+description = "Auto-archive protocol mail older than this many minutes"
+default = "30"
+
+[vars.refinery_stale_hours]
+description = "Flag refinery beads that have not moved in this many hours"
+default = "2"
+
+[vars.patrol_proto]
+description = "Formula name to pour for the next patrol cycle"
+default = "mol-witness-patrol"
+
+[[steps]]
+id = "assigned-work"
+title = "Process work already assigned to the witness"
+description = """
+Drain anything the controller or a sender has already routed to this witness
+session before doing periodic checks. The patrol wisp itself is one such
+bead — it sits assigned to `$GC_AGENT` and is the root of this run.
+
+**1. List your assigned work:**
+
+```bash
+bd list \\
+    --assignee="$GC_AGENT" --status=in_progress \\
+    --exclude-type=epic --json --limit=20 \\
+    > /tmp/witness-assigned.json
+```
+
+The patrol wisp's root bead may surface here. That is expected — it is the
+in-flight patrol you are running right now. Identify it so you skip it
+in the loop below:
+
+```bash
+WISP_ID=$(jq -r '.[] | select(.title | test("witness.patrol";"i")) | .id' \\
+    /tmp/witness-assigned.json | head -1)
+```
+
+**2. For every other assigned bead, decide and act:**
+
+- If the bead is a `HELP:` or `BLOCKED:` recovery item routed from a polecat
+  (look at `metadata.gc.routed_to` and notes), follow the action in the
+  mail-types table below.
+- If the bead is a non-witness work item that somehow ended up assigned to
+  this witness, escalate to mayor and clear the assignee:
+
+```bash
+gc mail send mayor/ -s "ESCALATION: witness has non-witness work" \\
+    -m "Rig: $GC_RIG
+Bead: <id>
+Title: <title>
+The witness should not be doing implementation work. Routing back to pool."
+bd update <id> \\
+    --status open --assignee "" \\
+    --set-metadata gc.routed_to="$GC_RIG/{{binding_prefix}}polecat"
+```
+
+**Exit criteria:** No actionable beads remain assigned to the witness other
+than the in-flight patrol wisp.
+"""
+
+[[steps]]
+id = "inbox-drain"
+title = "Drain and triage the inbox"
+needs = ["assigned-work"]
+description = """
+Walk the inbox, categorize each message, auto-archive stale ones, and act on
+the rest. Stale protocol messages no longer reflect live state — keep them
+out of the witness's mental model.
+
+**1. Read inbox:**
+
+```bash
+gc mail inbox
+```
+
+**2. Categorize by subject prefix and act per the table:**
+
+| Subject contains            | Meaning                                  | Action                                                                                |
+|-----------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
+| `BLOCKED:` / `HELP:`        | Polecat or refinery needs help           | Inspect bead, peek the session, resolve OR escalate to mayor                          |
+| `STUCK POLECAT:`            | Self-generated stuck detection           | Bead+worktree already in this message; act once and archive                           |
+| `HANDOFF:`                  | Predecessor handing off context          | Load state, continue work, then archive                                               |
+| `LIFECYCLE:` / `SPAWN:`     | Agent lifecycle events                   | Verify hook loaded; no action otherwise                                               |
+| `RECOVERED_BEAD:`           | Self-logged recovery                     | Informational — archive                                                               |
+| `NOTICE:`                   | Polecat notice (e.g., pre-flight bug)    | Read for awareness; archive if not actionable                                         |
+
+**3. Auto-archive stale protocol mail:**
+
+Protocol messages older than `{{mail_stale_minutes}}` minutes describe state
+that has either been handled or has moved on. Archive without acting:
+
+```bash
+gc mail inbox --json \\
+    | jq -r --arg cutoff "$(date -u -v-{{mail_stale_minutes}}M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \\
+            || date -u -d '{{mail_stale_minutes}} minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \\
+        '.[] | select(.created_at < $cutoff) | .id' \\
+    | while read -r id; do
+        gc mail archive "$id"
+      done
+```
+
+If `gc mail inbox --json` is unavailable, use `gc mail peek <id>` per message
+and decide manually. Do not skip stale archive — the next pass will re-see
+the same messages and act twice.
+
+**4. For actionable items, do not chain-mail.** If you cannot resolve
+something locally:
+
+```bash
+gc mail send mayor/ -s "ESCALATION: <brief reason>" -m "..."
+```
+
+Then archive the source mail so this patrol pass does not re-escalate.
+
+**Exit criteria:** Inbox contains only fresh, actionable mail. Every stale
+protocol message has been archived.
+"""
+
+[[steps]]
+id = "stuck-session-detection"
+title = "Detect stuck polecat sessions"
+needs = ["inbox-drain"]
+description = """
+The controller only detects dead sessions. A polecat that is alive but
+frozen at an interactive prompt or wedged in a tool call is invisible to
+the bead store: the bead stays `in_progress` while no work happens.
+
+Detect this via the local LLM-proxy recordings: if a polecat's cwd has
+emitted no LLM exchange in `{{stuck_threshold_hours}}` hours while its
+bead is still in flight, it is stuck.
+
+**1. List in-progress beads in this rig:**
+
+```bash
+bd list \\
+    --status in_progress --json --limit=30 \\
+    > /tmp/witness-active-beads.json
+```
+
+**2. Query proxy recordings for stuck polecat sessions:**
+
+```bash
+TODAY=$(date -u +%Y-%m-%d)
+YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
+ctvs query sql "
+    SELECT cwd, MAX(message_created_at) AS last_activity, COUNT(*) AS parts
+    FROM proxy_messages
+    WHERE cwd LIKE '%/polecats/%' AND cwd LIKE '%$GC_RIG%'
+    GROUP BY cwd
+    HAVING last_activity < NOW() - INTERVAL '{{stuck_threshold_hours}} hours'
+    ORDER BY last_activity ASC
+" --format json --date "$TODAY" --date "$YESTERDAY" \\
+    > /tmp/witness-stuck.json 2>/dev/null || echo '[]' > /tmp/witness-stuck.json
+```
+
+If `ctvs query` is unavailable or errors, fall back to `gc session peek`:
+open each polecat session, look at the last 80 lines; if they end with an
+unanswered tool prompt or an `AskUserQuestion`-style UI, treat as stuck.
+
+**3. For each stuck cwd, cross-reference with the active-beads list and
+escalate ONCE per stuck session per patrol:**
+
+```bash
+jq -c '.[]' /tmp/witness-stuck.json | while read -r row; do
+    CWD=$(echo "$row" | jq -r '.cwd')
+    LAST=$(echo "$row" | jq -r '.last_activity')
+    # Find the bead whose worktree matches CWD
+    BEAD=$(jq -r --arg cwd "$CWD" \\
+        '.[] | select(.metadata.work_dir == $cwd) | .id' \\
+        /tmp/witness-active-beads.json | head -1)
+    [ -z "$BEAD" ] && continue
+    # Skip if we already escalated this bead in a recent patrol
+    EXISTING=$(bd show "$BEAD" --json \\
+        | jq -r '.[0].metadata.witness_stuck_flagged_at // empty')
+    [ -n "$EXISTING" ] && continue
+
+    gc mail send mayor/ -s "STUCK POLECAT: $BEAD ($GC_RIG)" \\
+      -m "Rig: $GC_RIG
+Bead: $BEAD
+Worktree: $CWD
+Last LLM activity: $LAST
+Hours idle: >= {{stuck_threshold_hours}}
+Likely cause: polecat hung at interactive prompt or otherwise frozen.
+Recommended action: gc session peek <session-name> --lines 80 to confirm,
+then nudge or restart."
+
+    bd update "$BEAD" \\
+      --notes "Witness flagged stuck: $LAST" \\
+      --set-metadata witness_stuck_flagged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+done
+```
+
+The `witness_stuck_flagged_at` metadata is the dedupe guard. Subsequent
+patrol cycles see it and skip re-escalating until the bead's status changes
+or a polecat clears the flag on resume.
+
+**Exit criteria:** Every fresh stuck-state has produced exactly one mail to
+mayor and one bead note. The patrol does not loop on the same stuck bead.
+"""
+
+[[steps]]
+id = "orphan-recovery"
+title = "Recover beads assigned to absent agents"
+needs = ["stuck-session-detection"]
+description = """
+A bead is orphaned when its assignee names an agent that is not running
+and will not be restarted (pool resized down, agent removed from config,
+controller quarantined a crash-looping session). The drain protocol does
+not release beads — they sit assigned forever unless the witness recovers
+them.
+
+**1. Build the alive-sessions set:**
+
+```bash
+gc session list --state active --json \\
+    | jq -r '.[] | (.SessionName, .Alias, .AgentName, .ID)' \\
+    | sort -u > /tmp/witness-alive.txt
+```
+
+**2. Identify orphan candidates:**
+
+```bash
+bd list \\
+    --status in_progress --json --limit=50 \\
+    | jq -r '.[] | "\\(.id)\\t\\(.assignee // \"\")"' \\
+    | while IFS=$'\\t' read -r id assignee; do
+        [ -z "$assignee" ] && continue
+        if ! grep -qFx "$assignee" /tmp/witness-alive.txt; then
+            echo "$id\\t$assignee"
+        fi
+      done > /tmp/witness-orphan-candidates.tsv
+```
+
+A candidate is not always a true orphan. The controller restarts crashed
+agents and formula step resumption handles the worktree on its own. Before
+recovering, confirm the assignee names a role that has been removed (no
+agent template, pool size zero) — not one that is simply between restarts.
+
+**3. For each confirmed orphan, follow the canonical-chain decision tree:**
+
+```text
+worktree -> (push) -> branch -> (merge) -> target branch
+   canonical         canonical            canonical
+   until push        until merge          forever
+```
+
+Read `metadata.work_dir` and `metadata.branch` from the bead. Each
+transition moves the canonical location of the work forward.
+
+a. **Branch on origin (verified)** -> worktree is disposable.
+   ```bash
+   git -C <rig-root> fetch origin <branch>  # confirm it exists
+   git -C <rig-root> worktree remove <work_dir> --force 2>/dev/null || true
+   ```
+
+b. **Worktree exists, unpushed commits** -> push and make the branch
+   canonical, then remove the worktree.
+   ```bash
+   git -C <work_dir> add -A
+   git -C <work_dir> commit -m "wip: salvaged by witness" || true
+   git -C <work_dir> push -u origin HEAD:<branch>
+   git -C <rig-root> worktree remove <work_dir> --force 2>/dev/null || true
+   ```
+
+c. **Worktree with only uncommitted/untracked changes** -> same as (b). All
+   work is useful — never discard.
+
+d. **No worktree, no branch on origin** -> nothing to salvage.
+
+**4. Reset the bead to the pool:**
+
+```bash
+bd update <id> \\
+    --status open --assignee "" \\
+    --set-metadata gc.routed_to="$GC_RIG/{{binding_prefix}}polecat" \\
+    --notes "Recovered by witness: assignee <old> was not alive"
+```
+
+**5. Notify mayor ONLY for unexpected recoveries.** Routine pool-resize
+recoveries do not need mail. Mail mayor when:
+
+- The recovery salvaged unpushed commits or untracked work (data was at risk)
+- The same bead has been recovered multiple times (look for prior
+  `recovered_at` metadata)
+- The recovery happened mid-implementation (agent crashed, not drained)
+
+```bash
+gc mail send mayor/ -s "RECOVERED_BEAD: <id> ($GC_RIG)" \\
+    -m "Rig: $GC_RIG
+Bead: <id>
+Former assignee: <old>
+Salvage path: <a|b|c|d>
+Reason for mailing: <crash mid-work | repeat recovery | unpushed commits>"
+```
+
+**6. Do NOT recover beads for agents that are simply restarting.** If the
+agent template still exists and the pool target is non-zero, the controller
+will respawn it and formula resumption picks up where it left off. Give it
+time.
+
+**Exit criteria:** No in_progress bead is assigned to a session that no
+longer exists and will not be restarted.
+"""
+
+[[steps]]
+id = "refinery-queue-health"
+title = "Flag stale refinery work"
+needs = ["orphan-recovery"]
+description = """
+Refinery beads should move within minutes of being claimed. A bead that has
+been assigned to the refinery for more than `{{refinery_stale_hours}}` hours
+without an update is stuck — typically a hung merge run, a stranded PR
+validation, or a session that drained without closing the bead.
+
+**1. List refinery-assigned open beads:**
+
+```bash
+bd list \\
+    --assignee "$GC_RIG/{{binding_prefix}}refinery" \\
+    --status open --json --limit=20 \\
+    > /tmp/witness-refinery.json
+```
+
+Also check in_progress beads claimed by the refinery agent:
+
+```bash
+bd list \\
+    --status in_progress --json --limit=30 \\
+    | jq '[.[] | select(.assignee | test("refinery";"i"))]' \\
+    > /tmp/witness-refinery-active.json
+```
+
+**2. Flag beads older than the stale threshold:**
+
+```bash
+CUTOFF=$(date -u -v-{{refinery_stale_hours}}H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \\
+    || date -u -d '{{refinery_stale_hours}} hours ago' +%Y-%m-%dT%H:%M:%SZ)
+
+jq -r --arg cutoff "$CUTOFF" \\
+    '.[] | select(.updated_at < $cutoff) | .id' \\
+    /tmp/witness-refinery.json /tmp/witness-refinery-active.json \\
+    | sort -u | while read -r id; do
+        # Dedupe: skip if already flagged this cycle
+        EXISTING=$(bd show "$id" --json \\
+            | jq -r '.[0].metadata.witness_refinery_stale_at // empty')
+        [ -n "$EXISTING" ] && continue
+
+        gc session nudge "$GC_RIG/{{binding_prefix}}refinery" \\
+            "Run gc hook; bead $id has been waiting >{{refinery_stale_hours}}h."
+
+        bd update "$id" \\
+            --notes "Witness flagged stale in refinery queue: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \\
+            --set-metadata witness_refinery_stale_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      done
+```
+
+**3. Escalate to mayor only when the queue has been stale for multiple
+patrol cycles.** A single stale bead nudges the refinery; a persistent
+stale queue escalates:
+
+```bash
+STALE_COUNT=$(jq 'length' /tmp/witness-refinery.json)
+if [ "$STALE_COUNT" -ge 3 ]; then
+    gc mail send mayor/ -s "ESCALATION: refinery queue backed up ($GC_RIG)" \\
+        -m "Rig: $GC_RIG
+Open refinery beads: $STALE_COUNT
+The refinery has not drained in {{refinery_stale_hours}}h.
+Inspect: gc session peek $GC_RIG/{{binding_prefix}}refinery --lines 80"
+fi
+```
+
+Send one escalation per backed-up queue per patrol, not per bead.
+
+**Exit criteria:** Stale refinery beads have been nudged and noted; a
+persistent backup has produced one mayor escalation per patrol cycle.
+"""
+
+[[steps]]
+id = "pour-next-or-rest"
+title = "Pour the next patrol cycle or rest"
+needs = ["refinery-queue-health"]
+description = """
+The patrol is complete. The witness should drain so the controller can
+recycle the session; the next wake (from new mail, a nudge, or the
+controller's idle timer) will pour a fresh `{{patrol_proto}}` wisp.
+
+Do NOT pour another patrol wisp immediately in the same session. The pour
+should be the first action of the *next* incarnation, driven by the
+controller's wake cycle. Pouring back-to-back here risks runaway loops if
+the controller does not enforce a cooldown.
+
+**1. Confirm there is no pending work that requires staying awake:**
+
+```bash
+bd list \\
+    --assignee="$GC_AGENT" --status=in_progress \\
+    --exclude-type=epic --json --limit=5
+```
+
+If anything other than the in-flight patrol wisp is returned, loop back to
+`assigned-work` and process it. Otherwise:
+
+**2. Drain and exit:**
+
+```bash
+gc runtime drain-ack
+exit
+```
+
+The controller schedules the next wake. When the witness comes back, its
+startup protocol pours a fresh patrol wisp and the cycle repeats.
+
+**Context-exhaustion shortcut:** If your context has filled during patrol
+and you cannot complete the remaining steps cleanly, request a restart
+instead of partial-draining:
+
+```bash
+gc runtime request-restart
+```
+
+This blocks until the controller kills the session. The new session
+re-reads the formula and resumes from a fresh patrol.
+
+**Exit criteria:** The witness session is drained-acked and exited cleanly,
+or has requested a restart. The next wake will pour a new patrol wisp.
+"""

@@ -2,7 +2,7 @@ scope = "rig"
 wake_mode = "fresh"
 work_dir = ".gc/agents/{{.Rig}}/witness"
 nudge = "Check rig work status and mail."
-idle_timeout = "1h"
+idle_timeout = "30m"
 max_active_sessions = 1
 
 [env]
