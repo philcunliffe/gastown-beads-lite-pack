@@ -209,8 +209,99 @@ if [ -z "$BRANCH" ]; then
 fi
 ```
 
+`metadata.pr` is required and must point to an open draft PR whose head
+matches `metadata.target` (the integration branch). Catching a bad
+`metadata.pr` here is much cheaper than discovering it at `push-and-pr` or
+`mol-feature-ship`, after the refinery has already rebased and tested.
+
+```bash
+PR=$(bd show "$WORK" --json | jq -r '.[0].metadata.pr // empty')
+
+if [ -z "$PR" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="intake: metadata.pr missing — feature beads must carry the integration draft PR number"
+    gc mail send mayor/ -s "ESCALATION: feature bead $WORK missing metadata.pr" \
+      -m "Work bead: $WORK
+Feature flow requires metadata.pr to point to the integration-branch draft PR.
+This bead has merge_strategy=integration but no pr value.
+Likely cause: bead filed without /feature-launch, or /feature-launch had a bug.
+Recommended: close this bead and re-file via /feature-launch."
+    gc runtime drain-ack
+    exit 1
+fi
+
+PR_JSON=$(gh pr view "$PR" --json state,isDraft,headRefName 2>/dev/null || echo "")
+if [ -z "$PR_JSON" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="intake: gh pr view $PR failed (PR does not exist or auth issue)"
+    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to unviewable PR #$PR" \
+      -m "Work bead: $WORK
+gh pr view $PR returned no data. The PR may be deleted, in another repo, or gh auth may have failed."
+    gc runtime drain-ack
+    exit 1
+fi
+
+PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
+PR_DRAFT=$(echo "$PR_JSON" | jq -r '.isDraft')
+PR_HEAD=$(echo "$PR_JSON" | jq -r '.headRefName')
+
+if [ "$PR_STATE" != "OPEN" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="intake: PR #$PR is $PR_STATE (must be OPEN)"
+    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to $PR_STATE PR #$PR" \
+      -m "Work bead: $WORK
+The feature integration PR must stay OPEN throughout the flow."
+    gc runtime drain-ack
+    exit 1
+fi
+
+if [ "$PR_DRAFT" != "true" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="intake: PR #$PR is not a draft (must be draft until mol-feature-ship)"
+    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to non-draft PR #$PR" \
+      -m "Work bead: $WORK
+The feature integration PR must remain in draft state until mol-feature-ship flips it ready."
+    gc runtime drain-ack
+    exit 1
+fi
+
+if [ "$PR_HEAD" != "$TARGET" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="intake: PR #$PR head '$PR_HEAD' does not match metadata.target '$TARGET'"
+    gc mail send mayor/ -s "ESCALATION: feature bead $WORK PR/target mismatch" \
+      -m "Work bead: $WORK
+PR #$PR head: $PR_HEAD
+metadata.target: $TARGET
+These must match. Check /feature-launch slug versus bead metadata.target."
+    gc runtime drain-ack
+    exit 1
+fi
+
+echo "intake: metadata.pr=$PR validated (open draft, head=$PR_HEAD)"
+```
+
 Close this step with `$WORK`, `$BRANCH`, `$TARGET`, `$STRATEGY`,
-`$FINAL_TARGET`, and `$RUN_BRANCH` all set."""
+`$FINAL_TARGET`, `$RUN_BRANCH`, and `$PR` all set."""
 
 [[steps]]
 id = "rebase"
