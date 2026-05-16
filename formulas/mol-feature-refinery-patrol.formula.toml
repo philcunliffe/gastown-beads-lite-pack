@@ -1,0 +1,556 @@
+description = """
+Beads-lite refinery merge pass — feature integration-branch variant.
+
+For beads carrying `metadata.target` (the integration branch) and
+`metadata.merge_strategy=integration` (or unset; integration is the default
+for this flow), the refinery rebases the polecat branch onto the integration
+branch, pushes it back to origin, opens a GitHub PR `polecat -> integration`,
+waits for CI, auto-merges, and closes the bead.
+
+This formula is selected by the top-level dispatch step in
+`mol-refinery-patrol` whenever the assigned work bead has `metadata.target`
+set and `metadata.merge_strategy` is not `direct`. Beads without
+`metadata.target` (or with `merge_strategy=direct`) continue through the
+legacy direct flow in `mol-refinery-patrol` unchanged.
+
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
+## Work Bead Contract
+
+Polecats hand off:
+
+- `metadata.branch`: polecat source branch (`polecat/<bead-id>`)
+- `metadata.target`: integration branch (`integration/<slug>`)
+- `metadata.final_target`: branch the integration branch eventually merges into
+- `metadata.merge_strategy`: typically `integration`
+- `metadata.existing_pr`: optional existing PR URL to reuse
+
+On success, refinery records `pr_url`, `pr_number`, `merged_sha`,
+`merged_target`, and `merge_result=merged_via_pr`, then closes the bead. On
+rebase conflict or branch-caused test failure, refinery reopens the bead to
+the polecat pool with `metadata.rejection_reason` and routes
+`gc.routed_to=<rig>/<binding_prefix>polecat` so the polecat session picks it
+up for repair.
+
+## PR Merge Method
+
+Default merge method is `--squash` to keep the integration branch linear.
+Set `{{pr_merge_method}}` to `merge`, `rebase`, or `squash` to match the
+host repo's convention.
+"""
+formula = "mol-feature-refinery-patrol"
+version = 1
+contract = "graph.v2"
+
+[vars]
+[vars.binding_prefix]
+description = "Pack binding prefix used in session names"
+default = "gastown-beads-lite."
+
+[vars.work_query]
+description = "Command that returns refinery work JSON"
+default = "gc hook"
+
+[vars.run_tests]
+description = "Whether to run tests before merging"
+default = "true"
+
+[vars.setup_command]
+description = "Setup/install command. Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command. Empty = skip."
+default = ""
+
+[vars.lint_command]
+description = "Lint command. Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Test command to run when run_tests is true. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Build command. Empty = skip."
+default = ""
+
+[vars.target_branch]
+description = "Legacy fallback target. Integration-flow beads always carry metadata.target; this only fires if metadata.target is somehow missing."
+default = "main"
+
+[vars.delete_merged_branches]
+description = "Whether to delete the polecat source branch after the PR merges"
+default = "true"
+
+[vars.pr_merge_method]
+description = "gh pr merge method: squash, merge, or rebase. Default squash keeps the integration branch linear."
+default = "squash"
+
+[vars.ci_timeout_seconds]
+description = "Seconds to wait for the PR CI run before rejecting back to the polecat pool. Set to 0 to skip CI polling and merge as soon as the PR is opened."
+default = "1800"
+
+[vars.ci_poll_interval_seconds]
+description = "Seconds between CI status polls."
+default = "30"
+
+[[steps]]
+id = "validate-identity"
+title = "Validate refinery identity"
+description = """
+Fail fast if `$GC_AGENT` is not set. Refinery work is assigned to the
+canonical agent identity, not to a guessed alias.
+
+```bash
+if [ -z "${GC_AGENT:-}" ]; then
+    gc mail send mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
+      -m "The refinery session has no canonical agent identity."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step only when `$GC_AGENT` is non-empty."""
+
+[[steps]]
+id = "find-work"
+title = "Find and claim one merge bead"
+needs = ["validate-identity"]
+description = """
+Check the assigned queue first, then the configured work query:
+
+```bash
+WORK=$(bd list --assignee="$GC_AGENT" --status=in_progress --exclude-type=epic --json --limit=1 | jq -r '.[0].id // empty')
+if [ -z "$WORK" ]; then
+    WORK=$({{work_query}} | jq -r '.[0].id // empty')
+fi
+```
+
+If no work is found, drain and exit:
+```bash
+if [ -z "$WORK" ]; then
+    gc runtime drain-ack
+    exit 0
+fi
+```
+
+Claim the bead for this refinery pass:
+```bash
+bd update "$WORK" --status in_progress --assignee "$GC_AGENT"
+bd show "$WORK" --json | jq '.[0].metadata'
+```
+
+Close this step with `$WORK` set."""
+
+[[steps]]
+id = "intake"
+title = "Read metadata and confirm integration flow"
+needs = ["find-work"]
+description = """
+This formula assumes integration flow. Confirm the metadata before doing
+anything destructive.
+
+```bash
+BRANCH=$(bd show "$WORK" --json | jq -r '.[0].metadata.branch // empty')
+TARGET=$(bd show "$WORK" --json | jq -r '.[0].metadata.target // empty')
+STRATEGY=$(bd show "$WORK" --json | jq -r '.[0].metadata.merge_strategy // empty')
+FINAL_TARGET=$(bd show "$WORK" --json | jq -r '.[0].metadata.final_target // empty')
+RUN_BRANCH="refinery/$WORK"
+```
+
+`metadata.target` is required. If it is empty or `metadata.merge_strategy`
+is `direct`, dispatch in `mol-refinery-patrol` should have chosen the legacy
+flow; getting here is a configuration error:
+
+```bash
+if [ -z "$TARGET" ] || [ "$STRATEGY" = "direct" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="mol-feature-refinery-patrol invoked without integration metadata (target=$TARGET strategy=$STRATEGY)"
+    gc mail send mayor/ -s "ESCALATION: refinery integration flow without metadata.target" \
+      -m "Work bead: $WORK"
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+`metadata.branch` is required (same contract as the legacy refinery):
+
+```bash
+if [ -z "$BRANCH" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="metadata.branch is required for refinery"
+    gc mail send mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step with `$WORK`, `$BRANCH`, `$TARGET`, `$STRATEGY`,
+`$FINAL_TARGET`, and `$RUN_BRANCH` all set."""
+
+[[steps]]
+id = "rebase"
+title = "Rebase polecat branch onto the integration branch"
+needs = ["intake"]
+description = """
+Fetch the source and target branches:
+```bash
+git fetch --prune origin
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+git fetch origin "$TARGET"
+```
+
+Create a local refinery branch and rebase it onto the integration branch:
+```bash
+git checkout -B "$RUN_BRANCH" "origin/$BRANCH"
+git rebase "origin/$TARGET"
+```
+
+If the rebase conflicts, reject the bead back to the polecat pool. Leave the
+polecat source branch intact — a new polecat needs it for recovery:
+
+```bash
+git rebase --abort
+REASON="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)"
+bd update "$WORK" \
+  --status open \
+  --assignee "" \
+  --set-metadata rejection_reason="$REASON" \
+  --set-metadata merge_result=rejected \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+git checkout "origin/$TARGET"
+git branch -D "$RUN_BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit 1
+```
+
+**Exit criteria:** `$RUN_BRANCH` is rebased on `origin/$TARGET`."""
+
+[[steps]]
+id = "run-checks"
+title = "Run configured verification"
+needs = ["rebase"]
+description = """
+Run configured checks from the rebased refinery branch:
+
+```bash
+{{setup_command}}
+{{typecheck_command}}
+{{lint_command}}
+{{build_command}}
+```
+
+If `run_tests` is true, run:
+```bash
+{{test_command}}
+```
+
+Skip empty commands silently. Track exactly which checks passed or failed."""
+
+[[steps]]
+id = "handle-failures"
+title = "Reject branch-caused failures"
+needs = ["run-checks"]
+description = """
+If all configured checks passed, continue to `push-and-pr`.
+
+If a check failed, decide whether the failure is caused by the source branch
+or already exists on the integration branch.
+
+For a branch-caused failure, send the bead back to polecats:
+```bash
+SUMMARY="<failure summary>"
+bd update "$WORK" \
+  --status open \
+  --assignee "" \
+  --set-metadata rejection_reason="$SUMMARY" \
+  --set-metadata merge_result=rejected \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+git checkout "origin/$TARGET"
+git branch -D "$RUN_BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit 1
+```
+
+Leave the polecat source branch intact so a polecat can resume it.
+
+For a pre-existing target failure, check for an existing bug and create one
+if needed, then continue:
+```bash
+bd search "<failure summary>" --json
+bd create "Pre-existing failure: <summary>" --type bug --priority 1
+```
+
+Do not fix code in the refinery. The refinery is a merge processor."""
+
+[[steps]]
+id = "push-and-pr"
+title = "Push the rebased branch and open the PR"
+needs = ["handle-failures"]
+description = """
+Push the rebased polecat branch back to origin. `--force-with-lease` is safe
+because the polecat handed the branch off; only the refinery is moving it
+forward in this window.
+
+```bash
+git checkout "$RUN_BRANCH"
+git push origin HEAD:"$BRANCH" --force-with-lease
+```
+
+Open the per-bead PR `polecat -> integration`. If a PR already exists for the
+branch (rejection-aware resume; `metadata.existing_pr` set), reuse it.
+
+```bash
+EXISTING_PR=$(bd show "$WORK" --json | jq -r '.[0].metadata.existing_pr // empty')
+ISSUE_TITLE=$(bd show "$WORK" --json | jq -r '.[0].title')
+NOTES=$(bd show "$WORK" --json | jq -r '.[0].notes // empty')
+
+PR_BODY=$(cat <<EOF
+## Summary
+
+$ISSUE_TITLE
+
+$NOTES
+
+## Delivery
+
+- Issue: $WORK
+- Branch: $BRANCH
+- Integration target: $TARGET
+- Eventual target: ${FINAL_TARGET:-(unset)}
+
+This PR is auto-merged into the integration branch once CI is green. Human
+review for the full feature happens on the downstream PR
+(`$TARGET -> <final target>`), which is opened separately when the feature
+is ready to ship.
+EOF
+)
+
+if [ -n "$EXISTING_PR" ]; then
+    PR_URL="$EXISTING_PR"
+else
+    PR_URL=$(gh pr create \
+      --base "$TARGET" \
+      --head "$BRANCH" \
+      --title "$ISSUE_TITLE ($WORK)" \
+      --body "$PR_BODY" 2>/dev/null || true)
+    if [ -z "$PR_URL" ]; then
+        # A PR for this head may already exist (re-run after partial failure).
+        PR_URL=$(gh pr view "$BRANCH" --json url -q '.url' 2>/dev/null || true)
+    fi
+fi
+
+if [ -z "$PR_URL" ]; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="Could not create or discover PR for $BRANCH -> $TARGET"
+    gc mail send mayor/ -s "ESCALATION: refinery could not open PR" \
+      -m "Work bead: $WORK
+Branch: $BRANCH
+Target: $TARGET"
+    gc runtime drain-ack
+    exit 1
+fi
+
+PR_NUMBER=$(gh pr view "$BRANCH" --json number -q '.number')
+bd update "$WORK" \
+  --set-metadata pr_url="$PR_URL" \
+  --set-metadata pr_number="$PR_NUMBER"
+```
+
+**Exit criteria:** PR exists on the host repo and its URL/number are recorded
+on the bead."""
+
+[[steps]]
+id = "wait-ci"
+title = "Wait for PR CI to settle"
+needs = ["push-and-pr"]
+description = """
+**Config: ci_timeout_seconds = {{ci_timeout_seconds}}**
+**Config: ci_poll_interval_seconds = {{ci_poll_interval_seconds}}**
+
+Skip polling entirely when `ci_timeout_seconds` is `0`. This is a safe
+opt-out for repos that don't run CI on PRs:
+
+```bash
+if [ "{{ci_timeout_seconds}}" = "0" ]; then
+    echo "CI polling disabled; proceeding to merge."
+    # Close this step.
+fi
+```
+
+Otherwise poll the PR's combined check status until it settles or the
+timeout fires:
+
+```bash
+DEADLINE=$(( $(date +%s) + {{ci_timeout_seconds}} ))
+while : ; do
+    NOW=$(date +%s)
+    if [ "$NOW" -ge "$DEADLINE" ]; then
+        bd update "$WORK" \
+          --status open \
+          --assignee "" \
+          --set-metadata rejection_reason="CI did not settle within {{ci_timeout_seconds}}s for PR $PR_URL" \
+          --set-metadata merge_result=rejected \
+          --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+        git checkout "origin/$TARGET"
+        git branch -D "$RUN_BRANCH" 2>/dev/null || true
+        gc runtime drain-ack
+        exit 1
+    fi
+
+    STATE=$(gh pr view "$BRANCH" --json statusCheckRollup,mergeStateStatus -q '
+        if (.statusCheckRollup // []) | length == 0 then
+            "NO_CHECKS"
+        else
+            ([.statusCheckRollup[] | (.conclusion // .status // "PENDING")] | unique | sort | join(","))
+        end')
+
+    case "$STATE" in
+        NO_CHECKS|SUCCESS|"SUCCESS,SKIPPED"|"SKIPPED,SUCCESS"|SKIPPED|NEUTRAL|"NEUTRAL,SUCCESS"|"SUCCESS,NEUTRAL")
+            echo "CI green ($STATE); proceeding to merge."
+            break
+            ;;
+        *FAILURE*|*ERROR*|*CANCELLED*|*TIMED_OUT*|*ACTION_REQUIRED*)
+            bd update "$WORK" \
+              --status open \
+              --assignee "" \
+              --set-metadata rejection_reason="CI failed on PR $PR_URL (state=$STATE)" \
+              --set-metadata merge_result=rejected \
+              --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+            git checkout "origin/$TARGET"
+            git branch -D "$RUN_BRANCH" 2>/dev/null || true
+            gc runtime drain-ack
+            exit 1
+            ;;
+        *)
+            # PENDING / QUEUED / IN_PROGRESS — keep polling.
+            sleep {{ci_poll_interval_seconds}}
+            ;;
+    esac
+done
+```
+
+Leave the polecat source branch intact on rejection; the polecat resumes from
+it.
+
+**Exit criteria:** CI is green (or polling is disabled), and the PR is safe to merge."""
+
+[[steps]]
+id = "merge"
+title = "Merge the PR into the integration branch"
+needs = ["wait-ci"]
+description = """
+**Config: pr_merge_method = {{pr_merge_method}}**
+**Config: delete_merged_branches = {{delete_merged_branches}}**
+
+Pick the gh merge flag:
+
+```bash
+case "{{pr_merge_method}}" in
+    squash) MERGE_FLAG="--squash" ;;
+    merge)  MERGE_FLAG="--merge"  ;;
+    rebase) MERGE_FLAG="--rebase" ;;
+    *)
+        bd update "$WORK" \
+          --status open \
+          --assignee "" \
+          --set-metadata merge_result=blocked \
+          --set-metadata gc.routed_to=human \
+          --set-metadata blocked_reason="Unsupported pr_merge_method={{pr_merge_method}}"
+        gc mail send mayor/ -s "ESCALATION: unsupported pr_merge_method" -m "Work bead: $WORK"
+        gc runtime drain-ack
+        exit 1
+        ;;
+esac
+
+DELETE_FLAG=""
+if [ "{{delete_merged_branches}}" = "true" ]; then
+    DELETE_FLAG="--delete-branch"
+fi
+
+if ! gh pr merge "$PR_NUMBER" $MERGE_FLAG $DELETE_FLAG; then
+    bd update "$WORK" \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="gh pr merge failed for PR $PR_URL"
+    gc mail send mayor/ -s "ESCALATION: refinery PR merge failed" \
+      -m "PR: $PR_URL
+Work bead: $WORK
+Branch: $BRANCH -> $TARGET
+gh pr merge $MERGE_FLAG exited non-zero. PR left open for manual handling."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Refresh local state from the merged integration branch and capture the
+resulting SHA:
+
+```bash
+git fetch origin "$TARGET"
+git checkout "$TARGET" 2>/dev/null || git checkout -B "$TARGET" "origin/$TARGET"
+git reset --hard "origin/$TARGET"
+MERGED_SHA=$(git rev-parse HEAD)
+MERGED_SHORT=$(git rev-parse --short HEAD)
+git branch -D "$RUN_BRANCH" 2>/dev/null || true
+```
+
+**Exit criteria:** PR merged into `$TARGET`, polecat branch optionally
+deleted on origin, local `$TARGET` reset to the merged tip."""
+
+[[steps]]
+id = "close-bead"
+title = "Record merge metadata and close the bead"
+needs = ["merge"]
+description = """
+Record the durable merge result and close the bead. The downstream
+`integration -> final_target` PR (the human-review surface for the full
+feature) is opened by a separate workflow when the feature is ready to ship —
+this formula's responsibility ends at per-bead merge.
+
+```bash
+bd update "$WORK" \
+  --set-metadata merge_result=merged_via_pr \
+  --set-metadata merged_sha="$MERGED_SHA" \
+  --set-metadata merged_target="$TARGET" \
+  --unset-metadata rejection_reason
+bd close "$WORK" --reason "PR #$PR_NUMBER merged into $TARGET at $MERGED_SHORT"
+```
+
+**Exit criteria:** Bead closed with `pr_url`, `pr_number`, `merged_sha`,
+`merged_target`, and `merge_result=merged_via_pr` recorded."""
+
+[[steps]]
+id = "drain"
+title = "Drain refinery session"
+needs = ["close-bead"]
+description = """
+Summarize the merge result in the bead close reason or notes, then drain:
+
+```bash
+gc runtime drain-ack
+exit
+```
+
+The on-demand refinery will wake again when more work is assigned."""

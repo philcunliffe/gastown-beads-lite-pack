@@ -1,0 +1,281 @@
+description = """
+Polecat work lifecycle — feature integration-branch variant.
+
+Polecats using this formula branch off a per-feature integration branch
+(`metadata.target`) instead of `main`. The refinery
+(mol-feature-refinery-patrol) rebases the polecat branch onto the integration
+branch and opens a GitHub PR so the per-bead merge is visible in PR review.
+
+This is the integration flow for multi-bead features. It is selected by the
+top-level dispatch step in `mol-polecat-work` whenever the work bead carries
+`metadata.target` and `metadata.merge_strategy` is not `direct`. Existing
+beads without `metadata.target` continue to use the legacy direct flow in
+`mol-polecat-work` — that backwards-compat path is the hard contract.
+
+## Beads-Lite Command Note
+
+In gastown-beads-lite rig sessions, translate the `bd ...` examples below to:
+
+```bash
+BEADS_DIR=<rig-root>/.beads gc gastown-beads-lite bd ...
+```
+
+## Work Bead Contract
+
+Work beads flow:
+
+```text
+pool -> polecat -> refinery -> closed
+```
+
+The polecat sets:
+
+- `metadata.work_dir`: absolute path to the issue worktree
+- `metadata.branch`: source branch name (`polecat/<bead-id>`)
+- `metadata.target`: integration branch (caller-supplied; required for this flow)
+- `metadata.final_target`: branch the integration branch eventually merges into
+- `metadata.merge_strategy`: `integration` (default for this flow)
+- `metadata.gc.routed_to`: refinery target after handoff
+
+The refinery sets:
+
+- `metadata.pr_url` / `metadata.pr_number`
+- `metadata.merged_sha`
+- `metadata.merge_result`
+- `metadata.rejection_reason` if the polecat branch is sent back to the pool
+
+## Rejection-Aware Resume
+
+If the bead carries both `metadata.branch` and `metadata.rejection_reason`,
+a previous attempt was rejected by the refinery. Resume the existing branch
+and fix exactly the rejection reason before resubmitting — don't redo the
+whole task.
+
+## Integration Branch Creation
+
+Polecats are responsible for ensuring `origin/<metadata.target>` exists. If
+the branch is missing on origin, create it from `origin/<final_target>` and
+push. Creation is idempotent — concurrent polecats lose the race safely
+because `git push` (without `--force`) rejects non-fast-forward updates.
+"""
+formula = "mol-feature-polecat-work"
+extends = ["mol-polecat-base"]
+version = 1
+
+[vars]
+[vars.binding_prefix]
+description = "Pack binding prefix used in session names"
+default = "gastown-beads-lite."
+
+[vars.refinery_target]
+description = "Qualified refinery target. Empty means derive from $GC_RIG and binding_prefix."
+default = ""
+
+[vars.final_target_branch]
+description = "Fallback target the integration branch eventually merges into. Used when neither metadata.final_target nor origin's HEAD is available."
+default = "main"
+
+[[steps]]
+id = "workspace-setup"
+title = "Set up worktree and polecat branch off the integration branch"
+needs = ["load-context"]
+description = """
+Ensure you have an isolated worktree and a `polecat/<bead-id>` branch rooted
+on the bead's integration branch. Every step is idempotent so the sequence is
+safe to re-run after a crash or restart.
+
+**Config: final_target_branch = {{final_target_branch}}**
+
+**1. Read merge metadata and resolve the integration branch:**
+
+```bash
+META=$(bd show {{issue}} --json)
+TARGET=$(echo "$META" | jq -r '.[0].metadata.target // empty')
+STRATEGY=$(echo "$META" | jq -r '.[0].metadata.merge_strategy // empty')
+FINAL_TARGET=$(echo "$META" | jq -r '.[0].metadata.final_target // empty')
+if [ -z "$FINAL_TARGET" ]; then
+    FINAL_TARGET=$(git remote show origin 2>/dev/null | awk '/HEAD branch:/{print $NF}')
+fi
+FINAL_TARGET=${FINAL_TARGET:-{{final_target_branch}}}
+```
+
+This formula REQUIRES `metadata.target`. If it is empty, dispatch in
+`mol-polecat-work` should have routed to the legacy flow — getting here is a
+configuration error. Block the bead for human correction and exit:
+
+```bash
+if [ -z "$TARGET" ]; then
+    bd update {{issue}} \
+      --status open \
+      --assignee "" \
+      --set-metadata merge_result=blocked \
+      --set-metadata gc.routed_to=human \
+      --set-metadata blocked_reason="mol-feature-polecat-work requires metadata.target (integration branch)"
+    gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" \
+      -s "BLOCK: missing metadata.target for {{issue}}" \
+      -m "Integration-flow polecat invoked without metadata.target. Polecat exited."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Default `merge_strategy` to `integration` for this flow and persist the
+resolved values so the refinery and any rejection-aware resume see the same
+state:
+
+```bash
+if [ -z "$STRATEGY" ]; then
+    STRATEGY="integration"
+fi
+bd update {{issue}} \
+  --set-metadata merge_strategy="$STRATEGY" \
+  --set-metadata target="$TARGET" \
+  --set-metadata final_target="$FINAL_TARGET"
+```
+
+**2. Fetch and ensure the integration branch exists on origin:**
+
+```bash
+git fetch --prune origin
+git fetch origin "$FINAL_TARGET"
+
+if ! git ls-remote --exit-code --heads origin "$TARGET" > /dev/null 2>&1; then
+    # Idempotent create: push origin/$FINAL_TARGET to origin/$TARGET. Safe
+    # under concurrent polecats — `git push` (no --force) rejects non
+    # fast-forward updates, so if a sibling created it first our push fails
+    # and we fall through to the fetch below.
+    git push origin "refs/remotes/origin/$FINAL_TARGET:refs/heads/$TARGET" || true
+fi
+git fetch origin "$TARGET"
+```
+
+**3. Resolve or create the worktree.**
+
+Check `metadata.work_dir`:
+```bash
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
+```
+
+If it exists and the directory is present, reuse it:
+```bash
+cd "$WORKTREE"
+```
+
+Otherwise, create a worktree scoped to the bead, detached at the integration
+branch tip:
+```bash
+WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
+git worktree add "$WORKTREE_PATH" --detach "origin/$TARGET"
+cd "$WORKTREE_PATH"
+bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+```
+
+**4. Resolve or create the polecat branch.**
+
+```bash
+BRANCH=$(bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+```
+
+If `BRANCH` is set, fetch and check it out (a rejection resume lands here):
+```bash
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git checkout -B "$BRANCH" "origin/$BRANCH"
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git checkout "$BRANCH"
+else
+    echo "metadata.branch=$BRANCH was set but no local or remote branch exists."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+If the bead carries `metadata.rejection_reason`, rebase onto the latest
+integration branch and clear the rejection only after a clean rebase:
+```bash
+REJECTION=$(bd show {{issue}} --json | jq -r '.[0].metadata.rejection_reason // empty')
+if [ -n "$REJECTION" ]; then
+    git rebase "origin/$TARGET"
+    bd update {{issue}} --unset-metadata rejection_reason
+fi
+```
+
+If `BRANCH` is empty, create one off the integration branch:
+```bash
+git fetch origin "$TARGET"
+BRANCH="polecat/{{issue}}"
+git branch -D "$BRANCH" 2>/dev/null || true
+git checkout -B "$BRANCH" "origin/$TARGET"
+bd update {{issue}} --set-metadata branch="$BRANCH"
+```
+
+**5. Verify the workspace and run setup if configured:**
+```bash
+git status
+{{setup_command}}
+```
+Empty `setup_command` → skip.
+
+**Exit criteria:** In the issue worktree on `polecat/{{issue}}`, rooted on the
+latest `origin/$TARGET`, with `work_dir`, `branch`, `target`, `final_target`,
+and `merge_strategy` recorded on the bead."""
+
+[[steps]]
+id = "submit-to-refinery"
+title = "Push polecat branch, assign to refinery, and exit"
+needs = ["self-review"]
+description = """
+Hand off the completed polecat branch to refinery. You cease to exist after
+this step.
+
+**1. Ensure all work is committed:**
+```bash
+git status --porcelain
+```
+
+If any output appears:
+```bash
+git add -A
+git commit -m "chore: capture remaining work ({{issue}})"
+```
+
+**2. Push the polecat branch:**
+```bash
+BRANCH=$(git branch --show-current)
+git push origin HEAD:"$BRANCH"
+```
+
+**3. Record handoff metadata.**
+
+`workspace-setup` already wrote `branch`, `target`, `final_target`, and
+`merge_strategy`. Attach the implementation note:
+
+```bash
+bd update {{issue}} --notes "Implemented: <brief summary>"
+```
+
+**4. Assign the work bead to refinery:**
+```bash
+REFINERY_TARGET="{{refinery_target}}"
+if [ -z "$REFINERY_TARGET" ]; then
+    REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+fi
+bd update {{issue}} \
+  --status open \
+  --assignee "$REFINERY_TARGET" \
+  --set-metadata gc.routed_to="$REFINERY_TARGET"
+```
+
+Updating both `assignee` and `gc.routed_to` makes the work visible to the
+on-demand refinery session and stops the polecat pool from counting it.
+
+**5. Detach from the local branch and exit:**
+```bash
+git checkout --detach
+git branch -D "$BRANCH" 2>/dev/null || true
+gc runtime drain-ack
+exit
+```
+
+**Exit criteria:** Polecat branch pushed, metadata recorded, bead assigned to
+refinery, polecat session drained."""

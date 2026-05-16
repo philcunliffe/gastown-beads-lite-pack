@@ -27,7 +27,7 @@ failure, refinery reopens the bead to the polecat pool with
 `metadata.rejection_reason`.
 """
 formula = "mol-refinery-patrol"
-version = 1
+version = 2
 contract = "graph.v2"
 
 [vars]
@@ -137,9 +137,53 @@ fi
 Close this step with `$WORK` set."""
 
 [[steps]]
+id = "dispatch"
+title = "Dispatch to the integration-flow formula when opted in"
+needs = ["find-work"]
+description = """
+This formula is the legacy direct-merge flow. When the work bead opts into
+the feature integration-branch flow (by carrying both `metadata.target` AND
+`metadata.merge_strategy=integration`), STOP here and follow
+`mol-feature-refinery-patrol` instead.
+
+**1. Read dispatch metadata from the claimed work bead:**
+
+```bash
+META=$(bd show "$WORK" --json)
+TARGET=$(echo "$META" | jq -r '.[0].metadata.target // empty')
+STRATEGY=$(echo "$META" | jq -r '.[0].metadata.merge_strategy // empty')
+```
+
+**2. Decide flow:**
+
+The integration flow is OPT-IN: it requires `merge_strategy=integration` set
+explicitly. Anything else — unset, `direct`, `mr`, `pr`, or any other value
+— stays on the legacy path below. Beads handed off by the legacy polecat
+flow carry `target` set to the base branch (e.g. `main`) but never set
+`merge_strategy=integration`, so they correctly fall through to the legacy
+`rebase` / `merge-or-pr` steps.
+
+```bash
+if [ -n "$TARGET" ] && [ "$STRATEGY" = "integration" ]; then
+    echo "Integration flow detected (target=$TARGET strategy=$STRATEGY); switching to mol-feature-refinery-patrol."
+    # Read the new workflow formula and follow it from its rebase step
+    # onward. The bead is already claimed (find-work above) — resume there.
+    # Do NOT continue with the steps below in this formula.
+    bd formula show mol-feature-refinery-patrol
+fi
+```
+
+Otherwise the bead uses the legacy flow. Close this step and proceed to
+`rebase` below.
+
+**Exit criteria:** Either you have switched to `mol-feature-refinery-patrol`
+and are following that formula's steps, or you have confirmed the legacy
+flow applies and are about to execute `rebase` below."""
+
+[[steps]]
 id = "rebase"
 title = "Rebase source branch on target"
-needs = ["find-work"]
+needs = ["dispatch"]
 description = """
 Read merge metadata:
 

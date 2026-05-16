@@ -41,7 +41,7 @@ rejection reason before resubmitting.
 """
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 1
+version = 2
 
 [vars]
 [vars.binding_prefix]
@@ -53,9 +53,52 @@ description = "Qualified refinery target. Empty means derive from $GC_RIG and bi
 default = ""
 
 [[steps]]
+id = "dispatch"
+title = "Dispatch to the integration-flow formula when opted in"
+needs = ["load-context"]
+description = """
+This formula is the legacy direct-to-base-branch flow. When the work bead
+opts into the feature integration-branch flow (by carrying both
+`metadata.target` AND `metadata.merge_strategy=integration`), STOP here and
+follow `mol-feature-polecat-work` instead.
+
+**1. Read the dispatch metadata:**
+
+```bash
+META=$(bd show {{issue}} --json)
+TARGET=$(echo "$META" | jq -r '.[0].metadata.target // empty')
+STRATEGY=$(echo "$META" | jq -r '.[0].metadata.merge_strategy // empty')
+```
+
+**2. Decide flow:**
+
+The integration flow is OPT-IN: it requires `merge_strategy=integration` set
+explicitly (by `/feature-launch` or a human filer). Anything else — unset
+strategy, `direct`, or any other value — stays on the legacy path. This is
+the backwards-compat contract: every bead filed before this dispatch step
+existed has `merge_strategy` unset and therefore continues on the legacy
+flow exactly as before.
+
+```bash
+if [ -n "$TARGET" ] && [ "$STRATEGY" = "integration" ]; then
+    echo "Integration flow detected (target=$TARGET strategy=$STRATEGY); switching to mol-feature-polecat-work."
+    # Read the new workflow formula and follow it from its workspace-setup
+    # step onward. Do NOT continue with the steps below in this formula.
+    bd formula show mol-feature-polecat-work
+fi
+```
+
+Otherwise (any non-`integration` strategy) the bead uses the legacy flow.
+Close this step and proceed to `workspace-setup` below.
+
+**Exit criteria:** Either you have switched to `mol-feature-polecat-work` and
+are following that formula's steps, or you have confirmed the legacy flow
+applies and are about to execute `workspace-setup` below."""
+
+[[steps]]
 id = "workspace-setup"
 title = "Set up worktree and feature branch"
-needs = ["load-context"]
+needs = ["dispatch"]
 description = """
 Ensure you have an isolated git worktree and a clean feature branch. These
 commands are intended to be idempotent after a crash or restart.
