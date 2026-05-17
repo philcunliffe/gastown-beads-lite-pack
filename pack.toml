@@ -2,18 +2,37 @@
 name = "gastown-beads-lite"
 schema = 2
 
-# This pack ships its own city-scope dog in agents/dog/. The resolver
-# registers it as `gastown-beads-lite.dog` (qualified by pack name) — it
-# co-exists with the unqualified `dog` from the maintenance system pack,
-# which stays in place as a Dolt-flavored fallback that never gets work
-# in beads-lite cities (all mol-dog-* formulas are listed in
-# `[orders].skip` in beads-lite city.toml files).
+[imports.maintenance]
+source = "../../.gc/system/packs/maintenance"
+
+# This pack PATCHES the maintenance system pack's `dog` agent with
+# beads-lite-flavored overrides (wake_mode, work_dir, prompt template,
+# nudge text). Single dog registered city-wide via the patches mechanism,
+# which avoids the duplicate-agent validation error that hits when the
+# pack tries to register a sibling agent under the same name.
 #
-# Cities using this pack should:
-#   1. Route warrants to `gastown-beads-lite.dog` (not the unqualified `dog`)
-#   2. Add the standard `[orders].skip` list to silence dolt formulas
-#   3. Optionally set `shadow = "silent"` on `[imports.gastown-beads-lite]`
-#      in city.toml to suppress the resolver shadow warning
+# This mirrors how the upstream `gastown` pack patches the same dog in
+# Dolt-flavored cities — see .gc/system/packs/gastown/pack.toml for the
+# canonical pattern.
+#
+# Known limitation: the patches.agent schema does not accept work_query,
+# sling_query, or scale_check fields, so the beads-lite-specific delegating
+# scripts (`gc gastown-beads-lite work-query/sling-query/scale-check ...`)
+# are not wired up via this patch. The dog still functions via `gc hook`
+# polling; routed work is picked up by the gc.routed_to metadata convention.
+# If beads-lite-specific dog scaling/routing logic is needed, find a
+# different injection point (e.g., a separate scoped agent or a city.toml
+# override).
+#
+# Cities using this pack should add the standard `[orders].skip` list to
+# silence dolt-flavored mol-dog-* formulas that don't apply to beads-lite.
+
+[[patches.agent]]
+name = "dog"
+wake_mode = "fresh"
+work_dir = ".gc/agents/dogs/{{.AgentBase}}"
+prompt_template = "prompts/dog.template.md"
+nudge = "Run gc hook; it checks assigned warrants first, then routed pool work."
 
 [[named_session]]
 template = "mayor"
