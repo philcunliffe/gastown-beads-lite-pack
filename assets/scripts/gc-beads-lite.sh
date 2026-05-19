@@ -348,7 +348,21 @@ case "$op" in
     depends_on="${2:-}"
     dep_type="${3:-blocks}"
     [ -n "$issue_id" ] && [ -n "$depends_on" ] || die "usage: dep-add <issue-id> <depends-on-id> [type]"
-    bd_cmd dep add "$issue_id" "$depends_on" --type "$dep_type" >/dev/null
+    # For parent-child edges, swallow the "already a child" rejection.
+    # gc sling --formula wiring re-asserts the molecule hierarchy as a
+    # parent-child dep, which bd-lite rejects as a deadlock even though
+    # the relationship is identical to what hierarchy already provides.
+    # Other dep types still fail loudly.
+    if [ "$dep_type" = "parent-child" ]; then
+      dep_out=$(bd_cmd dep add "$issue_id" "$depends_on" --type "$dep_type" 2>&1) || {
+        case "$dep_out" in
+          *"already a child of"*) : ;;
+          *) printf '%s\n' "$dep_out" >&2; exit 1 ;;
+        esac
+      }
+    else
+      bd_cmd dep add "$issue_id" "$depends_on" --type "$dep_type" >/dev/null
+    fi
     ;;
 
   dep-remove)
