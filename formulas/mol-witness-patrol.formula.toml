@@ -103,7 +103,7 @@ WISP_ID=$(jq -r '.[] | select(.title | test("witness.patrol";"i")) | .id' \\
   this witness, escalate to mayor and clear the assignee:
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: witness has non-witness work" \\
+gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: witness has non-witness work" \\
     -m "Rig: $GC_RIG
 Bead: <id>
 Title: <title>
@@ -174,7 +174,7 @@ the same messages and act twice.
 something locally:
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: <brief reason>" -m "..."
+gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: <brief reason>" -m "..."
 ```
 
 Then archive the source mail so this patrol pass does not re-escalate.
@@ -342,7 +342,7 @@ jq -c '.[]' /tmp/witness-stuck.json | while read -r row; do
         continue
     fi
 
-    gc mail send mayor/ -s "STUCK POLECAT: $BEAD ($GC_RIG)" \\
+    gc mail send gastown-beads-lite.mayor/ -s "STUCK POLECAT: $BEAD ($GC_RIG)" \\
       -m "Rig: $GC_RIG
 Bead: $BEAD
 Worktree: $CWD
@@ -493,7 +493,7 @@ recoveries do not need mail. Mail mayor when:
 - The recovery happened mid-implementation (agent crashed, not drained)
 
 ```bash
-gc mail send mayor/ -s "RECOVERED_BEAD: <id> ($GC_RIG)" \\
+gc mail send gastown-beads-lite.mayor/ -s "RECOVERED_BEAD: <id> ($GC_RIG)" \\
     -m "Rig: $GC_RIG
 Bead: <id>
 Former assignee: <old>
@@ -569,7 +569,7 @@ stale queue escalates:
 ```bash
 STALE_COUNT=$(jq 'length' /tmp/witness-refinery.json)
 if [ "$STALE_COUNT" -ge 3 ]; then
-    gc mail send mayor/ -s "ESCALATION: refinery queue backed up ($GC_RIG)" \\
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery queue backed up ($GC_RIG)" \\
         -m "Rig: $GC_RIG
 Open refinery beads: $STALE_COUNT
 The refinery has not drained in {{refinery_stale_hours}}h.

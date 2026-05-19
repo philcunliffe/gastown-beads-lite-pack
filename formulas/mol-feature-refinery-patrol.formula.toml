@@ -119,7 +119,7 @@ canonical agent identity, not to a guessed alias.
 
 ```bash
 if [ -z "${GC_AGENT:-}" ]; then
-    gc mail send mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
       -m "The refinery session has no canonical agent identity."
     gc runtime drain-ack
     exit 1
@@ -186,7 +186,7 @@ if [ -z "$TARGET" ] || [ "$STRATEGY" = "direct" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="mol-feature-refinery-patrol invoked without integration metadata (target=$TARGET strategy=$STRATEGY)"
-    gc mail send mayor/ -s "ESCALATION: refinery integration flow without metadata.target" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery integration flow without metadata.target" \
       -m "Work bead: $WORK"
     gc runtime drain-ack
     exit 1
@@ -203,7 +203,7 @@ if [ -z "$BRANCH" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="metadata.branch is required for refinery"
-    gc mail send mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
     gc runtime drain-ack
     exit 1
 fi
@@ -224,7 +224,7 @@ if [ -z "$PR" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="intake: metadata.pr missing — feature beads must carry the integration draft PR number"
-    gc mail send mayor/ -s "ESCALATION: feature bead $WORK missing metadata.pr" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: feature bead $WORK missing metadata.pr" \
       -m "Work bead: $WORK
 Feature flow requires metadata.pr to point to the integration-branch draft PR.
 This bead has merge_strategy=integration but no pr value.
@@ -242,7 +242,7 @@ if [ -z "$PR_JSON" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="intake: gh pr view $PR failed (PR does not exist or auth issue)"
-    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to unviewable PR #$PR" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: feature bead $WORK refers to unviewable PR #$PR" \
       -m "Work bead: $WORK
 gh pr view $PR returned no data. The PR may be deleted, in another repo, or gh auth may have failed."
     gc runtime drain-ack
@@ -260,7 +260,7 @@ if [ "$PR_STATE" != "OPEN" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="intake: PR #$PR is $PR_STATE (must be OPEN)"
-    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to $PR_STATE PR #$PR" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: feature bead $WORK refers to $PR_STATE PR #$PR" \
       -m "Work bead: $WORK
 The feature integration PR must stay OPEN throughout the flow."
     gc runtime drain-ack
@@ -274,7 +274,7 @@ if [ "$PR_DRAFT" != "true" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="intake: PR #$PR is not a draft (must be draft until mol-feature-ship)"
-    gc mail send mayor/ -s "ESCALATION: feature bead $WORK refers to non-draft PR #$PR" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: feature bead $WORK refers to non-draft PR #$PR" \
       -m "Work bead: $WORK
 The feature integration PR must remain in draft state until mol-feature-ship flips it ready."
     gc runtime drain-ack
@@ -288,7 +288,7 @@ if [ "$PR_HEAD" != "$TARGET" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="intake: PR #$PR head '$PR_HEAD' does not match metadata.target '$TARGET'"
-    gc mail send mayor/ -s "ESCALATION: feature bead $WORK PR/target mismatch" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: feature bead $WORK PR/target mismatch" \
       -m "Work bead: $WORK
 PR #$PR head: $PR_HEAD
 metadata.target: $TARGET
@@ -462,7 +462,7 @@ if [ -z "$PR_URL" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="Could not create or discover PR for $BRANCH -> $TARGET"
-    gc mail send mayor/ -s "ESCALATION: refinery could not open PR" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery could not open PR" \
       -m "Work bead: $WORK
 Branch: $BRANCH
 Target: $TARGET"
@@ -576,7 +576,7 @@ case "{{pr_merge_method}}" in
           --set-metadata merge_result=blocked \
           --set-metadata gc.routed_to=human \
           --set-metadata blocked_reason="Unsupported pr_merge_method={{pr_merge_method}}"
-        gc mail send mayor/ -s "ESCALATION: unsupported pr_merge_method" -m "Work bead: $WORK"
+        gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: unsupported pr_merge_method" -m "Work bead: $WORK"
         gc runtime drain-ack
         exit 1
         ;;
@@ -594,7 +594,7 @@ if ! gh pr merge "$PR_NUMBER" $MERGE_FLAG $DELETE_FLAG; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="gh pr merge failed for PR $PR_URL"
-    gc mail send mayor/ -s "ESCALATION: refinery PR merge failed" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery PR merge failed" \
       -m "PR: $PR_URL
 Work bead: $WORK
 Branch: $BRANCH -> $TARGET

@@ -29,7 +29,7 @@ in real time.** Hard rules:
 - **NEVER ask clarifying questions in plain text and stop.** Decide, act,
   or escalate to mayor via outbound mail.
 
-Your escalation target is the mayor, reached via `gc mail send mayor/`. The
+Your escalation target is the mayor, reached via `gc mail send gastown-beads-lite.mayor/`. The
 mayor's session is human-facing and the human will see your mail. Your own
 output is not user-facing — only your mail to mayor is.
 
@@ -159,7 +159,7 @@ the dog (action), a mail to mayor (human visibility), and a
 ```bash
 # 1. Mail mayor for human visibility (kept even though the dog will act —
 #    mayors should still see stuck-detection events).
-gc mail send mayor/ -s "STUCK POLECAT: <bead-id> ({{ .RigName }})" -m "Rig: {{ .RigName }}
+gc mail send gastown-beads-lite.mayor/ -s "STUCK POLECAT: <bead-id> ({{ .RigName }})" -m "Rig: {{ .RigName }}
 Bead: <id>
 Worktree: <cwd>
 Last LLM activity: <timestamp>
@@ -296,7 +296,7 @@ recoveries do not need mail. Mail when:
 - The recovery happened mid-implementation (crash, not drain)
 
 ```bash
-gc mail send mayor/ -s "RECOVERED_BEAD: <id> ({{ .RigName }})" \
+gc mail send gastown-beads-lite.mayor/ -s "RECOVERED_BEAD: <id> ({{ .RigName }})" \
     -m "Rig: {{ .RigName }}
 Bead: <id>
 Former assignee: <old>
@@ -351,7 +351,7 @@ gc session nudge "{{ .RigName }}/{{ .BindingPrefix }}refinery" "Run gc hook and 
 Escalate only when the rig needs a human decision:
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: <brief reason>" -m "Rig: {{ .RigName }}
+gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: <brief reason>" -m "Rig: {{ .RigName }}
 Context: <what happened>
 Need: <decision or help needed>"
 ```
@@ -425,7 +425,7 @@ needed.
 | Set branch metadata                   | `BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update <id> --set-metadata branch=<name>`                 |
 | Inspect bead                          | `BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd show <id> --json \| jq '.[0].metadata'`                   |
 | Peek a session                        | `gc session peek "{{ .RigName }}/<session>" --lines 80`                                                               |
-| Escalate to mayor                     | `gc mail send mayor/ -s "ESCALATION: <reason>" -m "..."`                                                              |
+| Escalate to mayor                     | `gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: <reason>" -m "..."`                                                              |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}

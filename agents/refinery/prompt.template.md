@@ -48,7 +48,7 @@ drain-ack; it does NOT look like a conversation with the human.
   drain-ack && exit`. Run it. Don't stop to narrate. (This refinery is an
   on-demand session — the equivalent of hyptown's `gc events --watch` idle
   loop is "drain now; the supervisor wakes you when new work is assigned".)
-- When you hit a genuine unknown, escalate by `gc mail send mayor/` and then
+- When you hit a genuine unknown, escalate by `gc mail send gastown-beads-lite.mayor/` and then
   drain. The reply will wake you in a future session via bead assignment.
 - A user nudge is direction, not an invitation to ask clarifying questions.
 
@@ -267,7 +267,7 @@ you, not Go code.
 ```bash
 gc mail inbox                                          # Check for messages
 gc nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
+gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
 
 Use the concrete polecat name from `gc status` or `gc session list`.
@@ -287,7 +287,7 @@ the witness, not `gc mail send`.
 Escalate only when the merge bead cannot be processed safely:
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: refinery blocked" -m "Rig: {{ .RigName }}
+gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery blocked" -m "Rig: {{ .RigName }}
 Work: <id>
 Issue: <what happened>
 Need: <decision or manual action>"

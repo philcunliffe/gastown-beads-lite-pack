@@ -80,7 +80,7 @@ agent identity, not to a guessed alias.
 
 ```bash
 if [ -z "${GC_AGENT:-}" ]; then
-    gc mail send mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery started without GC_AGENT" \
       -m "The refinery session has no canonical agent identity."
     gc runtime drain-ack
     exit 1
@@ -128,7 +128,7 @@ if [ -z "$BRANCH" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="metadata.branch is required for refinery"
-    gc mail send mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery bead missing branch" -m "Work bead: $WORK"
     gc runtime drain-ack
     exit 1
 fi
@@ -367,7 +367,7 @@ if [ "$MERGE_STRATEGY" = "mr" ]; then
           --set-metadata merge_result=blocked \
           --set-metadata gc.routed_to=human \
           --set-metadata blocked_reason="Pull request validation failed"
-        gc mail send mayor/ -s "ESCALATION: refinery PR validation failed" -m "Work bead: $WORK"
+        gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: refinery PR validation failed" -m "Work bead: $WORK"
         gc runtime drain-ack
         exit 1
     fi
@@ -393,7 +393,7 @@ if [ "$MERGE_STRATEGY" != "direct" ] && [ "$MERGE_STRATEGY" != "mr" ]; then
       --set-metadata merge_result=blocked \
       --set-metadata gc.routed_to=human \
       --set-metadata blocked_reason="Unsupported merge_strategy=$MERGE_STRATEGY"
-    gc mail send mayor/ -s "ESCALATION: unsupported refinery merge strategy" -m "Work bead: $WORK"
+    gc mail send gastown-beads-lite.mayor/ -s "ESCALATION: unsupported refinery merge strategy" -m "Work bead: $WORK"
     gc runtime drain-ack
     exit 1
 fi
