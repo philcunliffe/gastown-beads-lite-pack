@@ -60,7 +60,7 @@ if [ -d "$WT" ] && [ -n "$(ls -A "$WT" 2>/dev/null)" ]; then
         [ -e "$entry" ] || continue
         name="${entry##*/}"
         case "$name" in
-            .gc|.runtime|.logs|state.json)
+            .gc|.runtime|.logs|.claude|state.json)
                 ;;
             .beads)
                 for sub in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
