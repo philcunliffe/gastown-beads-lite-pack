@@ -250,52 +250,33 @@ together: total LLM silence (any session that has gone quiet) and
 external-progress silence (a session still generating exchanges but with no
 incoming user or tool_result message — typically a tool-call loop).
 
-The `proxy_messages.role` column was renamed to `message_type` in some ctvs
-versions. Autodetect which is present; if neither, fall back to total-
-silence detection only and log a WARN.
+The hypaware `ai_gateway_messages` dataset uses a stable `role` column,
+so no schema autodetect is needed. The external-input filter keys off
+roles `user` and `tool_result`.
 
 ```bash
 TODAY=$(date -u +%Y-%m-%d)
 YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
-
-SCHEMA=$(ctvs query sql "PRAGMA table_info(proxy_messages)" --format json --date "$TODAY" 2>/dev/null || echo "[]")
-if echo "$SCHEMA" | jq -e '.[] | select(.name == "role")' >/dev/null 2>&1; then
-    ROLE_COL="role"
-elif echo "$SCHEMA" | jq -e '.[] | select(.name == "message_type")' >/dev/null 2>&1; then
-    ROLE_COL="message_type"
-else
-    echo "stuck-detection: WARN: proxy_messages has neither role nor message_type column; falling back to full-silence detection only" >&2
-    ROLE_COL=""
-fi
-
-if [ -n "$ROLE_COL" ]; then
-    EXT_INPUT_FILTER="MAX(CASE WHEN $ROLE_COL IN ('user', 'tool_result') THEN message_created_at END) AS last_external_input,"
-    EXT_INPUT_PREDICATE="OR last_external_input < NOW() - INTERVAL '{{loop_threshold_hours}} hours'"
-else
-    EXT_INPUT_FILTER=""
-    EXT_INPUT_PREDICATE=""
-fi
-
 WITNESS_CWD="${PWD:-$(pwd)}"
 
-ctvs query sql "
+hyp query sql "
     SELECT cwd,
            MAX(message_created_at) AS last_any,
-           $EXT_INPUT_FILTER
+           MAX(CASE WHEN role IN ('user', 'tool_result') THEN message_created_at END) AS last_external_input,
            COUNT(*) AS parts
-    FROM proxy_messages
+    FROM ai_gateway_messages
     WHERE (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
       AND cwd LIKE '%$GC_RIG%'
       AND cwd != '$WITNESS_CWD'
     GROUP BY cwd
     HAVING last_any < NOW() - INTERVAL '{{stuck_threshold_hours}} hours'
-       $EXT_INPUT_PREDICATE
+       OR last_external_input < NOW() - INTERVAL '{{loop_threshold_hours}} hours'
     ORDER BY last_any ASC
 " --format json --date "$TODAY" --date "$YESTERDAY" \\
     > /tmp/witness-stuck.json 2>/dev/null || echo '[]' > /tmp/witness-stuck.json
 ```
 
-If `ctvs query` is unavailable or errors, fall back to `gc session peek`:
+If `hyp query` is unavailable or errors, fall back to `gc session peek`:
 open each polecat or refinery session, look at the last 80 lines; if they
 end with an unanswered tool prompt or an `AskUserQuestion`-style UI, treat
 as stuck.
@@ -378,7 +359,7 @@ dog's prompt." \\
         bd update "$WARRANT_ID" \\
             --set-metadata gc.routed_to="gastown-beads-lite.dog" \\
             --set-metadata target="$CWD" \\
-            --set-metadata reason="ctvs LLM silence >= {{stuck_threshold_hours}}h" \\
+            --set-metadata reason="hyp LLM silence >= {{stuck_threshold_hours}}h" \\
             --set-metadata requester="${GC_AGENT:-witness}" \\
             --set-metadata source_bead="$BEAD"
         echo "stuck-detection: filed warrant $WARRANT_ID for $BEAD (dog will handle)"

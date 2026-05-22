@@ -96,7 +96,7 @@ above. It sequences six steps:
 
 1. **assigned-work** — drain anything already routed to you
 2. **inbox-drain** — categorize and triage mail, auto-archive stale items
-3. **stuck-session-detection** — call the ctvs query block below
+3. **stuck-session-detection** — call the hyp query block below
 4. **orphan-recovery** — salvage beads whose assignee is no longer alive
 5. **refinery-queue-health** — flag stale refinery work
 6. **pour-next-or-rest** — drain so the controller can cycle you
@@ -116,9 +116,8 @@ signals against the local LLM-proxy recordings:
   is still emitting LLM exchanges. The session is generating tool calls in
   a loop with no forward progress.
 
-The `proxy_messages.role` column was renamed to `message_type` in some
-ctvs versions; the formula autodetects which is present and falls back to
-total-silence detection only if neither exists.
+The hypaware `ai_gateway_messages` dataset standardizes on a `role` column
+(no message_type variant), so no schema autodetect is needed.
 
 City-scope agents (mayor, dog) have cwds that don't contain `$GC_RIG` and
 are NOT flagged here. A separate watchdog or mayor-side periodic check
@@ -135,8 +134,8 @@ BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd list \
 TODAY=$(date -u +%Y-%m-%d)
 YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
 WITNESS_CWD="${PWD:-$(pwd)}"
-ctvs query sql "SELECT cwd, MAX(message_created_at) AS last_any, COUNT(*) AS parts
-FROM proxy_messages
+hyp query sql "SELECT cwd, MAX(message_created_at) AS last_any, COUNT(*) AS parts
+FROM ai_gateway_messages
 WHERE (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
   AND cwd LIKE '%{{ .RigName }}%'
   AND cwd != '$WITNESS_CWD'
@@ -192,7 +191,7 @@ dog's prompt." \
 BEADS_DIR="{{ .RigRoot }}/.beads" gc gastown-beads-lite bd update "$WARRANT_ID" \
     --set-metadata gc.routed_to="gastown-beads-lite.dog" \
     --set-metadata target="<cwd>" \
-    --set-metadata reason="ctvs LLM silence >= 2h" \
+    --set-metadata reason="hyp LLM silence >= 2h" \
     --set-metadata requester="${GC_AGENT:-witness}" \
     --set-metadata source_bead="<id>"
 ```
@@ -210,7 +209,7 @@ If `bd create` fails, the mail+stamp path still completes — human
 visibility and dedupe survive even when the dog handoff breaks. Log a
 WARN line so the mayor reading the patrol log notices the gap.
 
-If `ctvs query` is unavailable or errors, fall back to `gc session peek`
+If `hyp query` is unavailable or errors, fall back to `gc session peek`
 heuristics: open the session, look at the last 80 lines, if they end with an
 unanswered tool prompt or AskUserQuestion-like UI, treat as stuck.
 
