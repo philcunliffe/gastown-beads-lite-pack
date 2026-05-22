@@ -456,9 +456,20 @@ c. **Worktree with only uncommitted/untracked changes** -> same as (b). All
 
 d. **No worktree, no branch on origin** -> nothing to salvage.
 
-**4. Reset the bead to the pool:**
+**4. Re-check status, then reset the bead to the pool:**
+
+The candidate list was captured in step 1. The bead may have been closed
+by mayor, by the agent itself finishing work, or by the refinery merging
+between then and now. **Never re-open a closed bead** — re-check status
+immediately before each reset and skip if it's no longer `in_progress`:
 
 ```bash
+CURRENT_STATUS=$(bd show <id> --json | jq -r '.[0].status // empty')
+if [ "$CURRENT_STATUS" != "in_progress" ]; then
+    echo "orphan-recovery: skipping <id>; status is now '$CURRENT_STATUS' (closed during patrol)"
+    continue
+fi
+
 bd update <id> \\
     --status open --assignee "" \\
     --set-metadata gc.routed_to="$GC_RIG/{{binding_prefix}}polecat" \\
