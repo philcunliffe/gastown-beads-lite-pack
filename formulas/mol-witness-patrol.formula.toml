@@ -250,13 +250,26 @@ together: total LLM silence (any session that has gone quiet) and
 external-progress silence (a session still generating exchanges but with no
 incoming user or tool_result message — typically a tool-call loop).
 
-The hypaware `ai_gateway_messages` dataset uses a stable `role` column,
-so no schema autodetect is needed. The external-input filter keys off
-roles `user` and `tool_result`.
+The `hyp query` engine is read-only SELECT and rejects `NOW()`, quoted
+`INTERVAL '…'`, and `PRAGMA`. Compute cutoff timestamps in shell and
+compare against `message_created_at` as ISO strings — ISO-8601 sorts
+correctly. The hypaware `ai_gateway_messages` dataset uses a stable
+NOT-NULL `role` column, so no schema autodetect is needed.
 
 ```bash
 TODAY=$(date -u +%Y-%m-%d)
 YESTERDAY=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d 'yesterday' +%Y-%m-%d)
+
+# Convert hour thresholds (may be fractional) to integer minutes so BSD
+# `date -v-NM` accepts them. `bc -l` keeps fractions; awk truncates.
+STUCK_MINUTES=$(echo "{{stuck_threshold_hours}} * 60" | bc -l | awk '{printf "%d", $1}')
+LOOP_MINUTES=$(echo  "{{loop_threshold_hours}} * 60"  | bc -l | awk '{printf "%d", $1}')
+
+STUCK_CUTOFF=$(date -u -v-${STUCK_MINUTES}M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \\
+    || date -u -d "${STUCK_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+LOOP_CUTOFF=$(date -u -v-${LOOP_MINUTES}M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \\
+    || date -u -d "${LOOP_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+
 WITNESS_CWD="${PWD:-$(pwd)}"
 
 hyp query sql "
@@ -265,12 +278,13 @@ hyp query sql "
            MAX(CASE WHEN role IN ('user', 'tool_result') THEN message_created_at END) AS last_external_input,
            COUNT(*) AS parts
     FROM ai_gateway_messages
-    WHERE (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
+    WHERE cwd IS NOT NULL
+      AND (cwd LIKE '%/polecats/%' OR cwd LIKE '%/refinery%')
       AND cwd LIKE '%$GC_RIG%'
       AND cwd != '$WITNESS_CWD'
     GROUP BY cwd
-    HAVING last_any < NOW() - INTERVAL '{{stuck_threshold_hours}} hours'
-       OR last_external_input < NOW() - INTERVAL '{{loop_threshold_hours}} hours'
+    HAVING MAX(message_created_at) < '$STUCK_CUTOFF'
+       OR MAX(CASE WHEN role IN ('user', 'tool_result') THEN message_created_at END) < '$LOOP_CUTOFF'
     ORDER BY last_any ASC
 " --format json --date "$TODAY" --date "$YESTERDAY" \\
     > /tmp/witness-stuck.json 2>/dev/null || echo '[]' > /tmp/witness-stuck.json
